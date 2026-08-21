@@ -46,7 +46,7 @@ export async function analyzePdf(path: string): Promise<DocumentAnalysis> {
 export async function processPdf(
   path: string,
   analysis: DocumentAnalysis,
-  ocr: OCRProvider,
+  ocr: OCRProvider | null,
   onOCRCall: () => void,
 ): Promise<string> {
   const output: string[] = [];
@@ -55,6 +55,7 @@ export async function processPdf(
       output.push(page.localText);
       continue;
     }
+    if (!ocr) throw new Error("阿里云 OCR 凭证未配置");
     const prefix = join(config.PROCESSING_DIR, `${randomUUID()}-page`);
     try {
       await exec(

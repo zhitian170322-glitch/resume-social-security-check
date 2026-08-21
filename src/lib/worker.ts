@@ -9,7 +9,6 @@ import {
 } from "./document-processor";
 import {
   AliyunOCRProvider,
-  MockOCRProvider,
   OCRLimitError,
   type OCRProvider,
   assertOCRCapacity,
@@ -101,12 +100,11 @@ async function processTask(task: TaskRow) {
     throw error;
   }
 
-  const ocr: OCRProvider = estimatedOCRCalls
-    ? new AliyunOCRProvider()
-    : new MockOCRProvider();
+  const ocr: OCRProvider | null = estimatedOCRCalls ? new AliyunOCRProvider() : null;
   const readText = async (file: FileRow) => {
     const data = await fileStorage.read(file.storage_key);
     if (file.mime_type !== "application/pdf") {
+      if (!ocr) throw new Error("阿里云 OCR 凭证未配置");
       const result = await ocr.recognize(data, file.mime_type);
       recordOCRCall(task.id, Boolean(task.paid_override));
       return result.text;
@@ -181,11 +179,14 @@ async function runWorker() {
         await processTask(task);
       } catch (error) {
         const code = classifyError(error);
+        const detail = error instanceof Error ? error.message : "";
+        const missingCredential =
+          detail.includes("OCR 凭证未配置") || detail.includes("API Key 未配置");
         updateTask(task.id, {
           status: "FAILED",
           stage: "FAILED",
           error_code: code,
-          error_message: safeErrorMessage(code),
+          error_message: missingCredential ? detail : safeErrorMessage(code),
           updated_at: new Date().toISOString(),
         });
       }

@@ -82,13 +82,16 @@ export function currentMonthOCRUsage() {
   ).count;
 }
 
-export function assertOCRCapacity(estimatedCalls: number, paidOverride: boolean) {
-  const usage = currentMonthOCRUsage();
+export function assertOCRCapacity(
+  estimatedCalls: number,
+  paidOverride: boolean,
+  usage = currentMonthOCRUsage(),
+) {
   if (usage + estimatedCalls >= config.OCR_MONTHLY_ABSOLUTE_LIMIT) {
     throw new OCRLimitError("OCR_ABSOLUTE_LIMIT", "OCR 月度绝对熔断已触发");
   }
   if (
-    usage + estimatedCalls > config.OCR_MONTHLY_FREE_SAFE_LIMIT &&
+    usage + estimatedCalls >= config.OCR_MONTHLY_FREE_SAFE_LIMIT &&
     (!paidOverride || !config.OCR_ALLOW_PAID_OVERRIDE)
   ) {
     throw new OCRLimitError("OCR_CONFIRM_REQUIRED", "需要确认本任务使用付费 OCR");

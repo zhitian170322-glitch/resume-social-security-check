@@ -10,7 +10,11 @@ const envSchema = z.object({
   ALIYUN_ACCESS_KEY_SECRET: z.string().default(""),
   MAX_FILE_SIZE_MB: z.coerce.number().positive().default(20),
   MAX_TASK_UPLOAD_MB: z.coerce.number().positive().default(50),
-  MAX_CONCURRENT_VERIFICATION_TASKS: z.coerce.number().int().min(1).default(1),
+  MAX_CONCURRENT_VERIFICATION_TASKS: z.coerce
+    .number()
+    .int()
+    .refine((value) => value === 1, "V1.0 仅允许单 Worker")
+    .default(1),
   RAW_FILE_RETENTION_DAYS: z.coerce.number().int().positive().default(7),
   OCR_MONTHLY_WARNING_LIMIT: z.coerce.number().int().nonnegative().default(170),
   OCR_MONTHLY_FREE_SAFE_LIMIT: z.coerce.number().int().nonnegative().default(190),
