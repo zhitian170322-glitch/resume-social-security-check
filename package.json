@@ -1,0 +1,50 @@
+{
+  "name": "resume-social-security-check",
+  "version": "1.0.0",
+  "description": "简历与社保智能核验系统",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:init": "node scripts/init-db.mjs",
+    "cleanup": "node scripts/cleanup.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhitian170322-glitch/resume-social-security-check.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/zhitian170322-glitch/resume-social-security-check/issues"
+  },
+  "homepage": "https://github.com/zhitian170322-glitch/resume-social-security-check#readme",
+  "dependencies": {
+    "@alicloud/ocr-api20210707": "^3.1.3",
+    "@alicloud/openapi-client": "^0.4.15",
+    "@alicloud/pop-core": "^1.8.0",
+    "@alicloud/tea-typescript": "^1.8.0",
+    "@alicloud/tea-util": "^1.4.11",
+    "better-sqlite3": "^13.0.3",
+    "file-type": "^22.0.2",
+    "next": "^16.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "eslint": "^10.8.1",
+    "eslint-config-next": "^16.3.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
