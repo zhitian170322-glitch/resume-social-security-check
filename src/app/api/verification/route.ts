@@ -27,7 +27,11 @@ export async function POST(request: Request) {
     const expiresAt = new Date(
       now.getTime() + config.RAW_FILE_RETENTION_DAYS * 86_400_000,
     ).toISOString();
-    const validated = [
+    const validated: Array<{
+      file: File;
+      kind: "RESUME" | "SOCIAL_SECURITY";
+      data: Awaited<ReturnType<typeof validateUpload>>;
+    }> = [
       { file: resume, kind: "RESUME" as const, data: await validateUpload(resume, "RESUME") },
     ];
     for (const file of socialFiles) {
@@ -37,7 +41,7 @@ export async function POST(request: Request) {
         data: await validateUpload(file, "SOCIAL_SECURITY"),
       });
     }
-    const rows = [];
+    const rows: Array<(typeof validated)[number] & { id: string; key: string }> = [];
     for (const item of validated) {
       const id = randomUUID();
       const key = `${taskId}/${id}${item.data.extension}`;

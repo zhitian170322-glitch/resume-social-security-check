@@ -46,6 +46,7 @@ describe("固定结构化 Schema", () => {
     ).toBe(false);
     const missing = social("甲公司");
     const { pensionMonths: _removed, ...ocrMissing } = missing;
+    void _removed;
     expect(
       SocialSecurityExtractionSchema.safeParse({
         socialSecurityRecords: [ocrMissing],

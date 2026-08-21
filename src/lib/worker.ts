@@ -11,6 +11,7 @@ import {
   AliyunOCRProvider,
   MockOCRProvider,
   OCRLimitError,
+  type OCRProvider,
   assertOCRCapacity,
   recordOCRCall,
 } from "./ocr";
@@ -102,7 +103,9 @@ async function processTask(task: TaskRow) {
     throw error;
   }
 
-  const ocr = estimatedOCRCalls ? new AliyunOCRProvider() : new MockOCRProvider();
+  const ocr: OCRProvider = estimatedOCRCalls
+    ? new AliyunOCRProvider()
+    : new MockOCRProvider();
   const readText = async (file: FileRow) => {
     const data = buffers.get(file.id)!;
     if (file.mime_type !== "application/pdf") {
