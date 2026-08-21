@@ -70,15 +70,13 @@ async function processTask(task: TaskRow) {
   const socialFiles = files.filter((file) => file.kind === "SOCIAL_SECURITY");
   if (!resumeFile || !socialFiles.length) throw new Error("INVALID_FILE_TYPE");
 
-  const buffers = new Map<string, Buffer>();
-  for (const file of files) buffers.set(file.id, await fileStorage.read(file.storage_key));
   updateTask(task.id, { stage: "RESUME_READ", updated_at: new Date().toISOString() });
   updateTask(task.id, { stage: "SOCIAL_SECURITY_READ", updated_at: new Date().toISOString() });
 
   const analyses = new Map<string, DocumentAnalysis>();
   let estimatedOCRCalls = 0;
   for (const file of files) {
-    const analysis = await analyzeFile(file, buffers.get(file.id)!);
+    const analysis = await analyzeFile(file, await fileStorage.read(file.storage_key));
     if (analysis) {
       analyses.set(file.id, analysis);
       estimatedOCRCalls += analysis.estimatedOCRCalls;
@@ -107,7 +105,7 @@ async function processTask(task: TaskRow) {
     ? new AliyunOCRProvider()
     : new MockOCRProvider();
   const readText = async (file: FileRow) => {
-    const data = buffers.get(file.id)!;
+    const data = await fileStorage.read(file.storage_key);
     if (file.mime_type !== "application/pdf") {
       const result = await ocr.recognize(data, file.mime_type);
       recordOCRCall(task.id, Boolean(task.paid_override));
@@ -126,7 +124,6 @@ async function processTask(task: TaskRow) {
   for (const file of socialFiles) {
     socialTexts.push({ sourceFile: file.original_name, text: await readText(file) });
   }
-  buffers.clear();
 
   updateTask(task.id, { stage: "EXTRACTING", updated_at: new Date().toISOString() });
   const resume = await extractResume(resumeText);
