@@ -193,6 +193,98 @@ export const VerificationV2StatusSchema = z.enum([
   "MANUAL_REVIEW_REQUIRED",
 ]);
 
+export const VerificationEvidenceGateStatusSchema = z.enum([
+  "VALIDATED",
+  "UNVERIFIED",
+  "LOW_CONFIDENCE",
+  "CONFLICT",
+  "MANUAL_REQUIRED",
+  "MISSING",
+  "UNCERTAIN",
+  "UNSUPPORTED",
+]);
+
+export const CompanyMatchTypeSchema = z.enum([
+  "EXACT",
+  "NORMALIZED_MATCH",
+  "FUZZY_CANDIDATE",
+  "NO_MATCH",
+]);
+
+export const Phase8MatchStatusSchema = z.enum([
+  "EXACT_MATCH",
+  "COMPANY_MISMATCH",
+  "START_MONTH_MISMATCH",
+  "END_MONTH_MISMATCH",
+  "PERIOD_MISMATCH",
+  "GAP_DETECTED",
+  "RESUME_ONLY",
+  "SOCIAL_SECURITY_ONLY",
+  "PERSONAL_INSURANCE",
+  "MULTIPLE_COMPANIES_SAME_MONTH",
+  "INSUFFICIENT_EVIDENCE",
+  "MANUAL_REVIEW_REQUIRED",
+]);
+
+export const Phase8TaskConclusionSchema = z.enum([
+  "CONSISTENT",
+  "INCONSISTENT",
+  "PARTIALLY_CONSISTENT",
+  "INSUFFICIENT_EVIDENCE",
+  "MANUAL_REVIEW_REQUIRED",
+]);
+
+export const VerificationPeriodSchema = z
+  .object({
+    startMonth: YearMonthSchema,
+    endMonth: YearMonthSchema,
+  })
+  .strict();
+
+export const VerificationEvidenceRefSchema = z
+  .object({
+    field: z.string().min(1),
+    sourceFile: z.string().min(1),
+    sourcePage: z.number().int().positive(),
+    sourceQuote: z.string(),
+    extractionMethod: ExtractionMethodSchema,
+  })
+  .strict();
+
+export const Phase8VerificationItemSchema = z
+  .object({
+    matchStatus: Phase8MatchStatusSchema,
+    companyMatchType: CompanyMatchTypeSchema.nullable(),
+    rawResumeCompanyName: z.string().nullable(),
+    rawSocialSecurityCompanyName: z.string().nullable(),
+    normalizedCompanyName: z.string().nullable(),
+    resumePeriod: VerificationPeriodSchema.nullable(),
+    socialSecurityPeriod: VerificationPeriodSchema.nullable(),
+    paidMonths: z.array(YearMonthSchema),
+    missingMonths: z.array(YearMonthSchema),
+    extraMonths: z.array(YearMonthSchema),
+    gapMonths: z.array(YearMonthSchema),
+    warnings: z.array(z.string()),
+    evidenceRefs: z.array(VerificationEvidenceRefSchema),
+    confidence: z.number().min(0).max(1),
+    requiresManualReview: z.boolean(),
+  })
+  .strict();
+
+export const Phase8EvidenceGateSchema = z
+  .object({
+    resume: VerificationEvidenceGateStatusSchema,
+    socialSecurity: VerificationEvidenceGateStatusSchema,
+  })
+  .strict();
+
+export const Phase8VerificationResultSchema = z
+  .object({
+    conclusion: Phase8TaskConclusionSchema,
+    items: z.array(Phase8VerificationItemSchema),
+  })
+  .strict();
+
 export type ResumeRecord = z.infer<typeof ResumeRecordSchema>;
 export type SocialSecurityRecord = z.infer<
   typeof SocialSecurityRecordSchema
@@ -216,6 +308,21 @@ export type SocialSecurityEvidenceRecord = z.infer<
   typeof SocialSecurityEvidenceRecordSchema
 >;
 export type VerificationV2Status = z.infer<typeof VerificationV2StatusSchema>;
+export type VerificationEvidenceGateStatus = z.infer<
+  typeof VerificationEvidenceGateStatusSchema
+>;
+export type CompanyMatchType = z.infer<typeof CompanyMatchTypeSchema>;
+export type Phase8MatchStatus = z.infer<typeof Phase8MatchStatusSchema>;
+export type Phase8TaskConclusion = z.infer<typeof Phase8TaskConclusionSchema>;
+export type Phase8VerificationItem = z.infer<
+  typeof Phase8VerificationItemSchema
+>;
+export type Phase8EvidenceGateValue = z.infer<
+  typeof Phase8EvidenceGateSchema
+>;
+export type Phase8VerificationResultValue = z.infer<
+  typeof Phase8VerificationResultSchema
+>;
 
 // Conventional camel-case exports are provided for consumers that name schemas
 // after their domain values.

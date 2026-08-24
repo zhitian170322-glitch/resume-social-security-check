@@ -5,6 +5,10 @@ import {
   type VerificationV2Status,
 } from "./schemas";
 import { normalizeCompanyCandidate } from "./evidence-validator";
+import {
+  verifyEvidenceRecords as verifyPhase8EvidenceRecords,
+  type Phase8EvidenceGate,
+} from "./verification-engine-phase8";
 
 export type VerificationV2Item = {
   status: VerificationV2Status;
@@ -176,7 +180,7 @@ function comparePair(
   };
 }
 
-export function verifyEvidenceRecords(input: {
+function verifyEvidenceRecordsLegacy(input: {
   resumeExperiences: ResumeEvidenceExperience[];
   socialSecurityRecords: SocialSecurityEvidenceRecord[];
 }): VerificationV2Item[] {
@@ -268,3 +272,15 @@ export function verifyEvidenceRecords(input: {
   });
   return results;
 }
+
+export function verifyEvidenceRecords(input: {
+  evidenceGate?: Phase8EvidenceGate;
+  resumeExperiences: ResumeEvidenceExperience[];
+  socialSecurityRecords: SocialSecurityEvidenceRecord[];
+}) {
+  return verifyPhase8EvidenceRecords(input);
+}
+
+// Kept private only as a migration reference. No production caller can invoke
+// the pre-Phase-8 algorithm without the explicit VALIDATED gate.
+void verifyEvidenceRecordsLegacy;
