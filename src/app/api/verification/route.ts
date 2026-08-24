@@ -5,6 +5,12 @@ import { fileStorage } from "@/lib/file-storage";
 import { UploadError, validateTaskSize, validateUpload } from "@/lib/upload";
 import { config } from "@/lib/config";
 import { kickWorker } from "@/lib/worker";
+import {
+  DOCUMENT_EXTRACTION_VERSION,
+  EVIDENCE_TASK_SCHEMA_VERSION,
+  registerDocument,
+} from "@/lib/document-extraction";
+import { contentHash } from "@/lib/stage-cache";
 
 export const runtime = "nodejs";
 
@@ -41,20 +47,34 @@ export async function POST(request: Request) {
         data: await validateUpload(file, "SOCIAL_SECURITY"),
       });
     }
-    const rows: Array<(typeof validated)[number] & { id: string; key: string }> = [];
+    const rows: Array<
+      (typeof validated)[number] & {
+        id: string;
+        documentId: string;
+        key: string;
+      }
+    > = [];
     for (const item of validated) {
       const id = randomUUID();
       const key = `${taskId}/${id}${item.data.extension}`;
       await fileStorage.save(key, item.data.buffer);
       savedKeys.push(key);
-      rows.push({ id, key, ...item });
+      rows.push({ id, documentId: randomUUID(), key, ...item });
     }
     db.transaction(() => {
       db.prepare(
         `INSERT INTO verification_tasks
-          (id, status, stage, created_at, updated_at)
-         VALUES (?, 'PENDING', 'FILES_SAVED', ?, ?)`,
-      ).run(taskId, now.toISOString(), now.toISOString());
+          (id, status, stage, schema_version, task_schema_version,
+           extraction_version, created_at, updated_at)
+         VALUES (?, 'PENDING', 'FILES_SAVED', ?, ?, ?, ?, ?)`,
+      ).run(
+        taskId,
+        EVIDENCE_TASK_SCHEMA_VERSION,
+        EVIDENCE_TASK_SCHEMA_VERSION,
+        DOCUMENT_EXTRACTION_VERSION,
+        now.toISOString(),
+        now.toISOString(),
+      );
       const insert = db.prepare(
         `INSERT INTO task_files
           (id, task_id, kind, original_name, storage_key, mime_type, size, created_at, expires_at)
@@ -72,6 +92,17 @@ export async function POST(request: Request) {
           now.toISOString(),
           expiresAt,
         );
+        registerDocument({
+          id: row.documentId,
+          taskId,
+          taskFileId: row.id,
+          kind: row.kind,
+          originalName: row.file.name,
+          mimeType: row.data.mime,
+          contentHash: contentHash(row.data.buffer),
+          extractionVersion: DOCUMENT_EXTRACTION_VERSION,
+          createdAt: now.toISOString(),
+        });
       }
     })();
     kickWorker();

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db, type TaskRow } from "@/lib/db";
 import { fileStorage } from "@/lib/file-storage";
 import { kickWorker } from "@/lib/worker";
+import { EVIDENCE_TASK_SCHEMA_VERSION } from "@/lib/document-extraction";
 
 export const runtime = "nodejs";
 
@@ -25,6 +26,8 @@ export async function GET(
     result: task.result_json ? JSON.parse(task.result_json) : null,
     createdAt: task.created_at,
     completedAt: task.completed_at,
+    taskSchemaVersion: task.task_schema_version,
+    extractionVersion: task.extraction_version,
   });
 }
 
@@ -38,6 +41,15 @@ export async function PATCH(
     | TaskRow
     | undefined;
   if (!task) return NextResponse.json({ message: "记录不存在" }, { status: 404 });
+  if (
+    task.task_schema_version < EVIDENCE_TASK_SCHEMA_VERSION ||
+    !task.extraction_version
+  ) {
+    return NextResponse.json(
+      { message: "旧版本任务不能进入新版提取流程，请创建新任务" },
+      { status: 409 },
+    );
+  }
   if (body.retry === true && task.status === "FAILED") {
     db.prepare(
       `UPDATE verification_tasks

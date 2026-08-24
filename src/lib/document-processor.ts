@@ -44,7 +44,10 @@ export async function analyzePdf(path: string): Promise<DocumentAnalysis> {
         ocrRecommended:
           quality.ocrRecommended ||
           quality.warnings.some((warning) =>
-            ["possible_two_column", "possible_table_loss", "text_order_suspicious"].includes(
+            [
+              "suspicious_two_column_order",
+              "possible_table_structure_loss",
+            ].includes(
               warning,
             ),
           ),
@@ -83,9 +86,10 @@ export async function extractResumeDocumentPages(input: {
   path: string;
   sourceFile: string;
   ocr: OCRProvider | null;
+  analysis?: DocumentAnalysis;
   onOCRCall?: (page: number, result: Awaited<ReturnType<OCRProvider["recognize"]>>) => void;
 }): Promise<DocumentPage[]> {
-  const analysis = await analyzePdf(input.path);
+  const analysis = input.analysis ?? (await analyzePdf(input.path));
   const evaluator = new TextQualityEvaluator({
     ocrScoreThreshold: config.TEXT_QUALITY_MIN_SCORE,
   });
@@ -94,7 +98,10 @@ export async function extractResumeDocumentPages(input: {
     const pdfText = page.localText;
     const pdfQuality = evaluator.evaluate(pdfText ?? "");
     const complexLayout = pdfQuality.warnings.some((warning) =>
-      ["possible_two_column", "possible_table_loss", "text_order_suspicious"].includes(
+      [
+        "suspicious_two_column_order",
+        "possible_table_structure_loss",
+      ].includes(
         warning,
       ),
     );

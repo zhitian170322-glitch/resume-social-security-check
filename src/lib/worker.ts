@@ -3,11 +3,16 @@ import { db, type TaskRow } from "./db";
 import { config } from "./config";
 import { fileStorage } from "./file-storage";
 import {
-  analyzePdf,
+  type DocumentAnalysis,
   extractResumeDocumentPages,
   renderPdfPage,
   withTemporaryDocument,
 } from "./document-processor";
+import {
+  DOCUMENT_EXTRACTION_VERSION,
+  EVIDENCE_TASK_SCHEMA_VERSION,
+  extractPdfDocument,
+} from "./document-extraction";
 import {
   AliyunOCRProvider,
   OCRLimitError,
@@ -60,6 +65,8 @@ type FileRow = {
   original_name: string;
   storage_key: string;
   mime_type: string;
+  document_id: string;
+  content_hash: string;
 };
 
 type OCRStagePayload = {
@@ -79,6 +86,15 @@ type StructuredPayload = {
 
 const workerGlobal = globalThis as typeof globalThis & { verificationWorkerRunning?: boolean };
 const PIPELINE_VERSION = "evidence-v2.1";
+
+export function isEvidencePipelineTask(
+  task: Pick<TaskRow, "task_schema_version" | "extraction_version">,
+) {
+  return (
+    task.task_schema_version >= EVIDENCE_TASK_SCHEMA_VERSION &&
+    task.extraction_version === DOCUMENT_EXTRACTION_VERSION
+  );
+}
 
 function parseStructuredCache(value: StructuredPayload | null): StructuredPayload | null {
   if (!value) return null;
@@ -119,9 +135,14 @@ function claimNextTask(): TaskRow | null {
       .prepare(
         `SELECT * FROM verification_tasks
          WHERE status = 'PENDING' AND stage = 'FILES_SAVED'
+           AND task_schema_version >= ?
+           AND extraction_version = ?
          ORDER BY created_at LIMIT 1`,
       )
-      .get() as TaskRow | undefined;
+      .get(
+        EVIDENCE_TASK_SCHEMA_VERSION,
+        DOCUMENT_EXTRACTION_VERSION,
+      ) as TaskRow | undefined;
     if (!task) return null;
     const changed = db
       .prepare(
@@ -259,7 +280,10 @@ async function tableOCR(
   }
 }
 
-async function estimateOCRCalls(files: FileRow[]) {
+async function estimateOCRCalls(
+  files: FileRow[],
+  pdfAnalyses: ReadonlyMap<string, DocumentAnalysis>,
+) {
   let count = 0;
   for (const file of files) {
     const data = await fileStorage.read(file.storage_key);
@@ -271,7 +295,8 @@ async function estimateOCRCalls(files: FileRow[]) {
       count += 1;
       continue;
     }
-    const analysis = await withTemporaryDocument(data, ".pdf", analyzePdf);
+    const analysis = pdfAnalyses.get(file.id);
+    if (!analysis) throw new Error("PDF_PARSE_FAILED: 缺少已缓存的 PDF 提取结果");
     count +=
       file.kind === "SOCIAL_SECURITY"
         ? analysis.pages.length
@@ -300,6 +325,7 @@ async function extractOCRStage(
   task: TaskRow,
   resumeFile: FileRow,
   socialFiles: FileRow[],
+  pdfAnalyses: ReadonlyMap<string, DocumentAnalysis>,
 ): Promise<OCRStagePayload> {
   const pages: DocumentPage[] = [];
   const socialPages: OCRStagePayload["socialPages"] = [];
@@ -322,6 +348,7 @@ async function extractOCRStage(
         path,
         sourceFile: resumeFile.original_name,
         ocr: generalOCR(task),
+        analysis: pdfAnalyses.get(resumeFile.id),
         onOCRCall(page, result) {
           logSafeEvent("info", {
             taskId: task.id,
@@ -364,7 +391,10 @@ async function extractOCRStage(
     const fileResults: SocialSecurityOCRResult[] = [];
     if (file.mime_type === "application/pdf") {
       await withTemporaryDocument(data, ".pdf", async (path) => {
-        const analysis = await analyzePdf(path);
+        const analysis = pdfAnalyses.get(file.id);
+        if (!analysis) {
+          throw new Error("PDF_PARSE_FAILED: 缺少已缓存的 PDF 提取结果");
+        }
         for (const page of analysis.pages) {
           const image = await renderPdfPage(path, page.page);
           const result = await tableOCR(task, image, page.page);
@@ -757,17 +787,42 @@ function usageForTask(taskId: string) {
 
 async function processTask(task: TaskRow) {
   const files = db
-    .prepare("SELECT * FROM task_files WHERE task_id = ? ORDER BY kind, created_at")
+    .prepare(
+      `SELECT task_files.*, documents.id AS document_id,
+              documents.content_hash AS content_hash
+       FROM task_files
+       JOIN documents ON documents.task_file_id = task_files.id
+       WHERE task_files.task_id = ?
+       ORDER BY task_files.kind, task_files.created_at`,
+    )
     .all(task.id) as FileRow[];
   const resumeFile = files.find((file) => file.kind === "RESUME");
   const socialFiles = files.filter((file) => file.kind === "SOCIAL_SECURITY");
   if (!resumeFile || !socialFiles.length) throw new Error("INVALID_FILE_TYPE");
   const fileHashes = [];
+  const pdfAnalyses = new Map<string, DocumentAnalysis>();
   for (const file of files) {
-    fileHashes.push(`${file.id}:${contentHash(await fileStorage.read(file.storage_key))}`);
+    const data = await fileStorage.read(file.storage_key);
+    const actualHash = contentHash(data);
+    if (actualHash !== file.content_hash) {
+      throw new Error("DOCUMENT_CONTENT_HASH_MISMATCH");
+    }
+    fileHashes.push(`${file.id}:${actualHash}`);
+    if (file.mime_type === "application/pdf") {
+      const extraction = await withTemporaryDocument(data, ".pdf", (path) =>
+        extractPdfDocument({
+          taskId: task.id,
+          documentId: file.document_id,
+          path,
+          contentHash: actualHash,
+          extractionVersion: task.extraction_version ?? DOCUMENT_EXTRACTION_VERSION,
+        }),
+      );
+      pdfAnalyses.set(file.id, extraction.analysis);
+    }
   }
   const cacheKey = contentHash(`${PIPELINE_VERSION}|${fileHashes.join("|")}`);
-  const estimatedOCRCalls = await estimateOCRCalls(files);
+  const estimatedOCRCalls = await estimateOCRCalls(files, pdfAnalyses);
   updateTask(task.id, {
     estimated_ocr_calls: estimatedOCRCalls,
     schema_version: 2,
@@ -780,7 +835,12 @@ async function processTask(task: TaskRow) {
   );
   if (!ocrPayload) {
     updateTask(task.id, { stage: "DOCUMENT_EXTRACTED", updated_at: new Date().toISOString() });
-    ocrPayload = await extractOCRStage(task, resumeFile, socialFiles);
+    ocrPayload = await extractOCRStage(
+      task,
+      resumeFile,
+      socialFiles,
+      pdfAnalyses,
+    );
     writeStageArtifact(task.id, "DOCUMENT_EXTRACTED", cacheKey, {
       pages: ocrPayload.pages.map((page) => ({ ...page, ocrText: null })),
     });
@@ -921,9 +981,13 @@ async function runWorker() {
     workerGlobal.verificationWorkerRunning = false;
     const pending = db
       .prepare(
-        "SELECT 1 FROM verification_tasks WHERE status = 'PENDING' AND stage = 'FILES_SAVED' LIMIT 1",
+        `SELECT 1 FROM verification_tasks
+         WHERE status = 'PENDING' AND stage = 'FILES_SAVED'
+           AND task_schema_version >= ?
+           AND extraction_version = ?
+         LIMIT 1`,
       )
-      .get();
+      .get(EVIDENCE_TASK_SCHEMA_VERSION, DOCUMENT_EXTRACTION_VERSION);
     if (pending) kickWorker();
   }
 }

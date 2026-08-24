@@ -1,13 +1,19 @@
 export type TextQualityWarning =
-  | "possible_two_column"
-  | "possible_table_loss"
+  | "too_short"
+  | "excessive_replacement_chars"
+  | "suspicious_two_column_order"
+  | "possible_table_structure_loss"
+  | "repeated_lines"
+  | "abnormal_line_fragmentation"
   | "date_company_alignment_low"
-  | "text_order_suspicious"
+  | "abnormal_unicode"
   | "low_text_density"
   | "ocr_recommended";
 
 export interface TextQualityEvaluatorConfig {
   blankPageMaxCharacters: number;
+  minimumUsefulCharacters: number;
+  replacementCharacterRatioThreshold: number;
   shortLineMaxCharacters: number;
   shortLineRatioThreshold: number;
   lowTextDensityCharactersPerLine: number;
@@ -28,6 +34,8 @@ export interface TextQualityEvaluatorConfig {
   orderAnomalyThreshold: number;
   chronologyDirectionChangeRatioThreshold: number;
   penaltyBlankPage: number;
+  penaltyTooShort: number;
+  penaltyReplacementCharacters: number;
   penaltyLowTextDensity: number;
   penaltyShortLines: number;
   penaltyDuplicateLines: number;
@@ -37,6 +45,7 @@ export interface TextQualityEvaluatorConfig {
   penaltyTextOrder: number;
   penaltyDuplicateCharacters: number;
   penaltyAbnormalUnicode: number;
+  highQualityScoreThreshold: number;
   ocrScoreThreshold: number;
   ocrWarningCountThreshold: number;
 }
@@ -44,6 +53,8 @@ export interface TextQualityEvaluatorConfig {
 export const DEFAULT_TEXT_QUALITY_CONFIG: Readonly<TextQualityEvaluatorConfig> =
   Object.freeze({
     blankPageMaxCharacters: 0,
+    minimumUsefulCharacters: 40,
+    replacementCharacterRatioThreshold: 0.03,
     shortLineMaxCharacters: 8,
     shortLineRatioThreshold: 0.7,
     lowTextDensityCharactersPerLine: 3,
@@ -64,6 +75,8 @@ export const DEFAULT_TEXT_QUALITY_CONFIG: Readonly<TextQualityEvaluatorConfig> =
     orderAnomalyThreshold: 0.65,
     chronologyDirectionChangeRatioThreshold: 0.5,
     penaltyBlankPage: 80,
+    penaltyTooShort: 55,
+    penaltyReplacementCharacters: 65,
     penaltyLowTextDensity: 20,
     penaltyShortLines: 8,
     penaltyDuplicateLines: 12,
@@ -73,6 +86,7 @@ export const DEFAULT_TEXT_QUALITY_CONFIG: Readonly<TextQualityEvaluatorConfig> =
     penaltyTextOrder: 16,
     penaltyDuplicateCharacters: 12,
     penaltyAbnormalUnicode: 12,
+    highQualityScoreThreshold: 75,
     ocrScoreThreshold: 60,
     ocrWarningCountThreshold: 3,
   });
@@ -98,6 +112,8 @@ export interface TextQualityMetrics {
   duplicateCharacterRatio: number;
   abnormalUnicodeCount: number;
   abnormalUnicodeRatio: number;
+  replacementCharacterCount: number;
+  replacementCharacterRatio: number;
   orderAnomaly: number;
   textDensity: number;
   blankPage: boolean;
@@ -107,6 +123,7 @@ export interface TextQualityResult {
   score: number;
   warnings: TextQualityWarning[];
   ocrRecommended: boolean;
+  qualityLevel: "HIGH" | "MEDIUM" | "LOW";
   metrics: TextQualityMetrics;
 }
 
@@ -175,12 +192,12 @@ function repeatedCharacterCount(
 function parseDateOrder(lines: string[]): number[] {
   const values: number[] = [];
   for (const line of lines) {
-    for (const match of line.matchAll(DATE_PATTERN)) {
-      const parts = match[0].match(/\d+/g) ?? [];
-      const year = Number(parts[0]);
-      const month = Number(parts[1] ?? 1);
-      values.push(year * 12 + month);
-    }
+    const match = line.match(DATE_PATTERN)?.[0];
+    if (!match) continue;
+    const parts = match.match(/\d+/g) ?? [];
+    const year = Number(parts[0]);
+    const month = Number(parts[1] ?? 1);
+    values.push(year * 12 + month);
   }
   return values;
 }
@@ -289,7 +306,7 @@ export class TextQualityEvaluator {
     );
     const tableLossRisk =
       dateCount >= this.config.minimumDatesForTableCheck
-        ? fragmentedStructuredLineRatio
+        ? Math.max(fragmentedStructuredLineRatio, wideGapLineRatio)
         : 0;
 
     const dateOrder = parseDateOrder(lines);
@@ -330,8 +347,20 @@ export class TextQualityEvaluator {
       abnormalUnicodeCount,
       Math.max(Array.from(normalized).length, characterCount),
     );
+    const replacementCharacterCount = Array.from(normalized).filter(
+      (character) => character === "\uFFFD",
+    ).length;
+    const replacementCharacterRatio = ratio(
+      replacementCharacterCount,
+      Math.max(Array.from(normalized).length, characterCount),
+    );
     const textDensity = ratio(characterCount, lines.length);
     const blankPage = characterCount <= this.config.blankPageMaxCharacters;
+    const tooShort =
+      !blankPage && characterCount < this.config.minimumUsefulCharacters;
+    const excessiveReplacementCharacters =
+      replacementCharacterRatio >=
+      this.config.replacementCharacterRatioThreshold;
 
     const possibleTwoColumn =
       twoColumnRisk >= this.config.wideGapLineRatioThreshold ||
@@ -350,14 +379,30 @@ export class TextQualityEvaluator {
         textDensity < this.config.lowTextDensityCharactersPerLine);
 
     const warnings: TextQualityWarning[] = [];
-    if (possibleTwoColumn) warnings.push("possible_two_column");
-    if (possibleTableLoss) warnings.push("possible_table_loss");
+    if (tooShort) warnings.push("too_short");
+    if (excessiveReplacementCharacters) {
+      warnings.push("excessive_replacement_chars");
+    }
+    if (possibleTwoColumn) warnings.push("suspicious_two_column_order");
+    if (possibleTableLoss) warnings.push("possible_table_structure_loss");
+    if (duplicateLineRatio >= this.config.duplicateLineRatioThreshold) {
+      warnings.push("repeated_lines");
+    }
+    if (shortLineRatio >= this.config.shortLineRatioThreshold) {
+      warnings.push("abnormal_line_fragmentation");
+    }
     if (alignmentLow) warnings.push("date_company_alignment_low");
-    if (textOrderSuspicious) warnings.push("text_order_suspicious");
+    if (abnormalUnicodeRatio >= this.config.abnormalUnicodeRatioThreshold) {
+      warnings.push("abnormal_unicode");
+    }
     if (lowTextDensity) warnings.push("low_text_density");
 
     let score = 100;
     if (blankPage) score -= this.config.penaltyBlankPage;
+    if (tooShort) score -= this.config.penaltyTooShort;
+    if (excessiveReplacementCharacters) {
+      score -= this.config.penaltyReplacementCharacters;
+    }
     if (lowTextDensity) score -= this.config.penaltyLowTextDensity;
     if (shortLineRatio >= this.config.shortLineRatioThreshold) {
       score -= this.config.penaltyShortLines;
@@ -382,14 +427,28 @@ export class TextQualityEvaluator {
 
     const ocrRecommended =
       blankPage ||
+      tooShort ||
+      excessiveReplacementCharacters ||
       score <= this.config.ocrScoreThreshold ||
       warnings.length >= this.config.ocrWarningCountThreshold;
     if (ocrRecommended) warnings.push("ocr_recommended");
+    const qualityLevel =
+      blankPage ||
+      excessiveReplacementCharacters ||
+      score < this.config.ocrScoreThreshold
+        ? "LOW"
+        : score >= this.config.highQualityScoreThreshold &&
+            !possibleTwoColumn &&
+            !possibleTableLoss &&
+            !textOrderSuspicious
+          ? "HIGH"
+          : "MEDIUM";
 
     return {
       score,
       warnings,
       ocrRecommended,
+      qualityLevel,
       metrics: {
         characterCount,
         chineseCharacterCount,
@@ -411,6 +470,8 @@ export class TextQualityEvaluator {
         duplicateCharacterRatio,
         abnormalUnicodeCount,
         abnormalUnicodeRatio,
+        replacementCharacterCount,
+        replacementCharacterRatio,
         orderAnomaly,
         textDensity,
         blankPage,
