@@ -74,12 +74,20 @@ Swap 不能作为正常工作内存。应用容器限制为 1400MB，任务由 S
 
 ## 回滚
 
-部署前记录当前镜像 ID，并备份 volume：
+部署前保留当前镜像并备份 volume：
 
 ```bash
 docker compose images
+docker image tag resume-social-security-check:latest resume-social-security-check:rollback
 docker run --rm -v resume-social-security-check_app-data:/data \
   -v "$PWD":/backup alpine tar czf /backup/app-data-backup.tgz -C /data .
 ```
 
-回滚时停止新版本，恢复上一镜像标签；如数据库也需回退，先保留当前副本，再从备份恢复 `/data`。禁止直接删除 volume。
+应用回滚使用当前 Compose（避免旧版 Nginx重新占用80/443）：
+
+```bash
+IMAGE_TAG=rollback docker compose up -d --no-build app
+```
+
+Migration 只向前新增表和列，通常不回滚数据库。如确需恢复数据，先保留当前副本，再从
+`app-data-backup.tgz` 恢复 `/data`。禁止直接删除 volume。

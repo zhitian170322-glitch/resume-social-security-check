@@ -1,6 +1,7 @@
 services:
   app:
     container_name: resume-social-security-check-app
+    image: resume-social-security-check:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
