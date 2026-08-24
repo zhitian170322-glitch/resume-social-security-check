@@ -139,8 +139,9 @@ EvidenceField 必须包含 value、status、sourceFile、sourcePage、sourceQuot
 2. 月份 value 只可把原文 YYYY.MM、YYYY-MM、YYYYMM、YYYY年MM月转换为 YYYY-MM。
 3. 原文没有字段时 value=null、status="missing"；无法确定时 value=null、status="uncertain"。禁止猜测。
 4. sourceQuote 必须逐字复制自指定页面，sourceFile/sourcePage 必须对应输入。
-5. extractionMethod 固定为 "deepseek"，confidence 为 0 到 1。
-6. 不计算任职月数，不判断公司关系，不判断核验结论。`,
+5. 同一段经历的公司、开始月份、结束月份必须引用同一个不超过300字的连续原文区块；不能跨区块拼接字段。
+6. extractionMethod 固定为 "deepseek"，confidence 为 0 到 1。
+7. 不计算任职月数，不判断公司关系，不判断核验结论。`,
     JSON.stringify(source),
     onCall,
   );

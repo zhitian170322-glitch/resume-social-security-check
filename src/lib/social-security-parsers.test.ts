@@ -172,6 +172,10 @@ describe("Guangdong social-security parser", () => {
       ocr: input,
       sourceFile: "广东.png",
     });
+    expect(result).toMatchObject({
+      status: "manual-required",
+      autoVerifiable: false,
+    });
 
     expect(result.records).toEqual([
       expect.objectContaining({
@@ -179,7 +183,7 @@ describe("Guangdong social-security parser", () => {
         companyNormalized: "广州 OIl 服务有限公司",
         startMonth: "2022-12",
         endMonth: "2023-02",
-        paidMonths: ["2022-12", "2023-01", "2023-02"],
+        paidMonths: [],
         pensionMonths: 3,
         injuryMonths: 3,
         unemploymentMonths: 2,

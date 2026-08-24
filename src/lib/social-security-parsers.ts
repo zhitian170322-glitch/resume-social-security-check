@@ -22,6 +22,15 @@ export interface ParsedSocialSecurityRecord {
   pensionMonths: number | null;
   injuryMonths: number | null;
   unemploymentMonths: number | null;
+  fieldConfidence: {
+    company: number | null;
+    startMonth: number | null;
+    endMonth: number | null;
+    paidMonths: number | null;
+    pensionMonths: number | null;
+    injuryMonths: number | null;
+    unemploymentMonths: number | null;
+  };
   source: SocialSecurityRecordSource;
 }
 
@@ -53,6 +62,7 @@ interface UnitMonth {
   unit: string;
   month: string;
   row: TableRow;
+  confidence: number | null;
 }
 
 const compact = (value: string) =>
@@ -92,19 +102,6 @@ export function parseOCRMonth(value: string): string | null {
 function monthIndex(value: string): number {
   const [year, month] = value.split("-").map(Number);
   return year * 12 + month - 1;
-}
-
-function monthFromIndex(value: number): string {
-  return `${Math.floor(value / 12)}-${String((value % 12) + 1).padStart(2, "0")}`;
-}
-
-function inclusiveMonths(start: string, end: string): string[] {
-  const first = monthIndex(start);
-  const last = monthIndex(end);
-  if (last < first) return [];
-  return Array.from({ length: last - first + 1 }, (_, index) =>
-    monthFromIndex(first + index),
-  );
 }
 
 function continuousMonthRuns(months: string[]): string[][] {
@@ -269,7 +266,10 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
   ): SocialSecurityParseResult {
     const { ocr, sourceFile: file } = unpackInput(input, sourceFile);
     const allRows = rows(ocr);
-    const companies = new Map<string, { name: string; row: TableRow }>();
+    const companies = new Map<
+      string,
+      { name: string; row: TableRow; confidence: number | null }
+    >();
     const months: UnitMonth[] = [];
 
     for (const header of allRows) {
@@ -277,11 +277,13 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
       if (mapping.has("unit") && mapping.has("company")) {
         for (const row of followingRows(allRows, header)) {
           const unit = cellAt(row, mapping.get("unit"))?.text.trim() ?? "";
-          const company = cellAt(row, mapping.get("company"))?.text ?? "";
+          const companyCell = cellAt(row, mapping.get("company"));
+          const company = companyCell?.text ?? "";
           if (unit && company.trim() && !parseOCRMonth(unit) && !parseOCRMonth(company)) {
             companies.set(correctedNumericText(unit).replace(/\s/g, ""), {
               name: company,
               row,
+              confidence: companyCell?.confidence ?? null,
             });
           }
         }
@@ -291,12 +293,14 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
       if (monthly.has("unit") && monthly.has("month")) {
         for (const row of followingRows(allRows, header)) {
           const unit = cellAt(row, monthly.get("unit"))?.text.trim() ?? "";
-          const month = parseOCRMonth(cellAt(row, monthly.get("month"))?.text ?? "");
+          const monthCell = cellAt(row, monthly.get("month"));
+          const month = parseOCRMonth(monthCell?.text ?? "");
           if (unit && month) {
             months.push({
               unit: correctedNumericText(unit).replace(/\s/g, ""),
               month,
               row,
+              confidence: monthCell?.confidence ?? null,
             });
           }
         }
@@ -317,6 +321,12 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
         continue;
       }
       const paidMonths = continuousMonthRuns(items.map((item) => item.month)).flat();
+      const monthConfidences = items
+        .map((item) => item.confidence)
+        .filter((value): value is number => value !== null);
+      const paidMonthConfidence = monthConfidences.length
+        ? Math.min(...monthConfidences)
+        : null;
       records.push({
         companyRaw: company.name,
         companyNormalized: normalizeCompanyName(company.name),
@@ -326,6 +336,15 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
         pensionMonths: null,
         injuryMonths: null,
         unemploymentMonths: null,
+        fieldConfidence: {
+          company: company.confidence,
+          startMonth: paidMonthConfidence,
+          endMonth: paidMonthConfidence,
+          paidMonths: paidMonthConfidence,
+          pensionMonths: null,
+          injuryMonths: null,
+          unemploymentMonths: null,
+        },
         source: combinedSource(file, [company.row, ...items.map((item) => item.row)]),
       });
     }
@@ -367,9 +386,15 @@ export class GuangdongSocialSecurityParser implements SocialSecurityTableParser 
       }
 
       for (const row of followingRows(allRows, header)) {
-        const companyRaw = cellAt(row, columns.get("company"))?.text ?? "";
-        const startMonth = parseOCRMonth(cellAt(row, columns.get("start"))?.text ?? "");
-        const endMonth = parseOCRMonth(cellAt(row, columns.get("end"))?.text ?? "");
+        const companyCell = cellAt(row, columns.get("company"));
+        const startCell = cellAt(row, columns.get("start"));
+        const endCell = cellAt(row, columns.get("end"));
+        const pensionCell = cellAt(row, columns.get("pension"));
+        const injuryCell = cellAt(row, columns.get("injury"));
+        const unemploymentCell = cellAt(row, columns.get("unemployment"));
+        const companyRaw = companyCell?.text ?? "";
+        const startMonth = parseOCRMonth(startCell?.text ?? "");
+        const endMonth = parseOCRMonth(endCell?.text ?? "");
         if (
           !companyRaw.trim() ||
           !startMonth ||
@@ -379,32 +404,38 @@ export class GuangdongSocialSecurityParser implements SocialSecurityTableParser 
           continue;
         }
         const pensionMonths = parseOCRNumber(
-          cellAt(row, columns.get("pension"))?.text ?? "",
+          pensionCell?.text ?? "",
         );
         const injuryMonths = parseOCRNumber(
-          cellAt(row, columns.get("injury"))?.text ?? "",
+          injuryCell?.text ?? "",
         );
         const unemploymentMonths = parseOCRNumber(
-          cellAt(row, columns.get("unemployment"))?.text ?? "",
+          unemploymentCell?.text ?? "",
         );
-        const rangeMonths = inclusiveMonths(startMonth, endMonth);
         records.push({
           companyRaw,
           companyNormalized: normalizeCompanyName(companyRaw),
           startMonth,
           endMonth,
-          paidMonths:
-            pensionMonths === rangeMonths.length ? rangeMonths : [],
+          paidMonths: [],
           pensionMonths,
           injuryMonths,
           unemploymentMonths,
+          fieldConfidence: {
+            company: companyCell?.confidence ?? null,
+            startMonth: startCell?.confidence ?? null,
+            endMonth: endCell?.confidence ?? null,
+            paidMonths: null,
+            pensionMonths: pensionCell?.confidence ?? null,
+            injuryMonths: injuryCell?.confidence ?? null,
+            unemploymentMonths: unemploymentCell?.confidence ?? null,
+          },
           source: combinedSource(file, [row]),
         });
       }
     }
 
-    const allPeriodsSupported =
-      records.length > 0 && records.every((record) => record.paidMonths.length > 0);
+    const allPeriodsSupported = false;
     return {
       template: "guangdong",
       status: allPeriodsSupported ? "parsed" : "manual-required",

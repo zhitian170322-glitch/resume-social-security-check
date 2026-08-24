@@ -139,11 +139,32 @@ export function validateResumeEvidence(
   );
   if (issues.length) value.candidateName.status = "uncertain";
   value.experiences.forEach((experience, index) => {
-    const checks = [
+    const quotes = [
+      experience.resumeCompany.sourceQuote,
+      experience.resumeStartMonth.sourceQuote,
+      experience.resumeEndMonth.sourceQuote,
+    ];
+    const sameBoundedBlock =
+      new Set(quotes).size === 1 &&
+      quotes[0].length <= 300 &&
+      experience.resumeCompany.sourceFile === experience.resumeStartMonth.sourceFile &&
+      experience.resumeCompany.sourceFile === experience.resumeEndMonth.sourceFile &&
+      experience.resumeCompany.sourcePage === experience.resumeStartMonth.sourcePage &&
+      experience.resumeCompany.sourcePage === experience.resumeEndMonth.sourcePage;
+    const checks: EvidenceIssue[] = [
       ...validateCompanyEvidence(pages, experience.resumeCompany, `experiences.${index}.company`),
       ...validateMonthEvidence(pages, experience.resumeStartMonth, `experiences.${index}.start`),
       ...validateMonthEvidence(pages, experience.resumeEndMonth, `experiences.${index}.end`),
     ];
+    if (!sameBoundedBlock) {
+      checks.push({
+        code: "EVIDENCE_MISMATCH",
+        field: `experiences.${index}`,
+        sourceFile: experience.resumeCompany.sourceFile,
+        sourcePage: experience.resumeCompany.sourcePage,
+        message: "公司与起止月份不是来自同一段不超过300字的连续原文区块",
+      });
+    }
     if (checks.length) {
       experience.resumeCompany.status = "uncertain";
       experience.resumeStartMonth.status = "uncertain";

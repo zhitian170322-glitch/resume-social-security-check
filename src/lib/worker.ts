@@ -32,12 +32,15 @@ import {
 } from "./evidence-validator";
 import {
   type DocumentPage,
+  DocumentPageSchema,
   type EvidenceMonthField,
   type EvidenceMonthsField,
   type EvidenceNumberField,
   type EvidenceStringField,
   type ResumeEvidenceExtraction,
+  ResumeEvidenceExtractionSchema,
   type SocialSecurityEvidenceRecord,
+  SocialSecurityEvidenceRecordSchema,
 } from "./schemas";
 import { verifyEvidenceRecords, type VerificationV2Item } from "./verification-engine-v2";
 import { createEvidenceReport } from "./result";
@@ -75,6 +78,33 @@ type StructuredPayload = {
 };
 
 const workerGlobal = globalThis as typeof globalThis & { verificationWorkerRunning?: boolean };
+const PIPELINE_VERSION = "evidence-v2.1";
+
+function parseStructuredCache(value: StructuredPayload | null): StructuredPayload | null {
+  if (!value) return null;
+  try {
+    return {
+      resume: ResumeEvidenceExtractionSchema.parse(value.resume),
+      social: SocialSecurityEvidenceRecordSchema.array().parse(value.social),
+      issues: Array.isArray(value.issues) ? value.issues : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseOCRStageCache(value: OCRStagePayload | null): OCRStagePayload | null {
+  if (!value || !Array.isArray(value.socialPages)) return null;
+  try {
+    return {
+      resumeSourceFile: value.resumeSourceFile,
+      pages: DocumentPageSchema.array().parse(value.pages),
+      socialPages: value.socialPages,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function updateTask(id: string, values: Record<string, string | number | null>) {
   const keys = Object.keys(values);
@@ -108,7 +138,9 @@ function generalOCR(task: TaskRow): OCRProvider {
   return {
     async recognize(input: Buffer, mimeType: string): Promise<OCRResult> {
       void mimeType;
-      const key = contentHash(`aliyun:RecognizeGeneral:${contentHash(input)}`);
+      const key = contentHash(
+        `${PIPELINE_VERSION}:aliyun:RecognizeGeneral:${contentHash(input)}`,
+      );
       const cached = readExtractionCache<OCRResult>(key);
       if (cached) {
         recordApiCall({
@@ -169,7 +201,9 @@ async function tableOCR(
       prepared = await sharp(prepared).jpeg({ quality: 90 }).toBuffer();
     }
   }
-  const key = contentHash(`aliyun:RecognizeTableOcr:${contentHash(prepared)}`);
+  const key = contentHash(
+    `${PIPELINE_VERSION}:aliyun:RecognizeTableOcr:${contentHash(prepared)}`,
+  );
   const cached = readExtractionCache<SocialSecurityOCRResult>(key);
   if (cached) {
     recordApiCall({
@@ -230,7 +264,7 @@ async function estimateOCRCalls(files: FileRow[]) {
   for (const file of files) {
     const data = await fileStorage.read(file.storage_key);
     const fileCacheKey = contentHash(
-      `file-ocr:${file.kind}:${contentHash(data)}`,
+      `${PIPELINE_VERSION}:file-ocr:${file.kind}:${contentHash(data)}`,
     );
     if (readExtractionCache(fileCacheKey)) continue;
     if (file.mime_type !== "application/pdf") {
@@ -271,7 +305,7 @@ async function extractOCRStage(
   const socialPages: OCRStagePayload["socialPages"] = [];
   const resumeData = await fileStorage.read(resumeFile.storage_key);
   const resumeFileCacheKey = contentHash(
-    `file-ocr:${resumeFile.kind}:${contentHash(resumeData)}`,
+    `${PIPELINE_VERSION}:file-ocr:${resumeFile.kind}:${contentHash(resumeData)}`,
   );
   const cachedResumePages = readExtractionCache<DocumentPage[]>(resumeFileCacheKey);
   if (cachedResumePages) {
@@ -310,7 +344,7 @@ async function extractOCRStage(
   for (const file of socialFiles) {
     const data = await fileStorage.read(file.storage_key);
     const socialFileCacheKey = contentHash(
-      `file-ocr:${file.kind}:${contentHash(data)}`,
+      `${PIPELINE_VERSION}:file-ocr:${file.kind}:${contentHash(data)}`,
     );
     const cachedSocial = readExtractionCache<{
       pages: DocumentPage[];
@@ -407,6 +441,7 @@ function stringEvidence(
   value: string | null,
   record: ParsedSocialSecurityRecord,
   status: EvidenceStringField["status"],
+  confidence = record.source.confidence,
 ): EvidenceStringField {
   return {
     value,
@@ -415,7 +450,7 @@ function stringEvidence(
     sourcePage: record.source.page,
     sourceQuote: record.source.quote,
     extractionMethod: "table_ocr",
-    confidence: record.source.confidence ?? 0,
+    confidence: confidence ?? 0,
   };
 }
 
@@ -423,59 +458,94 @@ function monthEvidence(
   value: string | null,
   record: ParsedSocialSecurityRecord,
   status: EvidenceMonthField["status"],
+  confidence = record.source.confidence,
 ): EvidenceMonthField {
-  return { ...stringEvidence(value, record, status), value };
+  return { ...stringEvidence(value, record, status, confidence), value };
 }
 
 function numberEvidence(
   value: number | null,
   record: ParsedSocialSecurityRecord,
   status: EvidenceNumberField["status"],
+  confidence = record.source.confidence,
 ): EvidenceNumberField {
-  return { ...stringEvidence(null, record, status), value };
+  return { ...stringEvidence(null, record, status, confidence), value };
 }
 
 function monthsEvidence(
   value: string[] | null,
   record: ParsedSocialSecurityRecord,
   status: EvidenceMonthsField["status"],
+  confidence = record.source.confidence,
 ): EvidenceMonthsField {
-  return { ...stringEvidence(null, record, status), value };
+  return { ...stringEvidence(null, record, status, confidence), value };
 }
 
 function convertParsedRecord(
   record: ParsedSocialSecurityRecord,
   template: "shenzhen" | "guangdong",
 ): SocialSecurityEvidenceRecord {
-  const verified =
-    record.source.confidence !== null && record.source.confidence >= config.OCR_MIN_CONFIDENCE;
-  const status = verified ? "verified" : "uncertain";
+  const statusFor = (confidence: number | null) =>
+    confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
+      ? ("verified" as const)
+      : ("uncertain" as const);
+  const companyStatus = statusFor(record.fieldConfidence.company);
+  const startStatus = statusFor(record.fieldConfidence.startMonth);
+  const endStatus = statusFor(record.fieldConfidence.endMonth);
+  const paidStatus = record.paidMonths.length
+    ? statusFor(record.fieldConfidence.paidMonths)
+    : ("unsupported" as const);
   const companyUncertain = /[OIl]/.test(record.companyRaw);
   const outsourcingOrDispatch = /劳务派遣|人力资源|外包/.test(record.companyRaw);
   return {
     companyRaw: stringEvidence(
       record.companyRaw,
       record,
-      companyUncertain ? "uncertain" : status,
+      companyUncertain ? "uncertain" : companyStatus,
+      record.fieldConfidence.company,
     ),
     companyNormalized: normalizeCompanyCandidate(record.companyRaw),
-    startMonth: monthEvidence(record.startMonth, record, status),
-    endMonth: monthEvidence(record.endMonth, record, status),
-    paidMonths: monthsEvidence(record.paidMonths, record, status),
+    startMonth: monthEvidence(
+      record.startMonth,
+      record,
+      startStatus,
+      record.fieldConfidence.startMonth,
+    ),
+    endMonth: monthEvidence(
+      record.endMonth,
+      record,
+      endStatus,
+      record.fieldConfidence.endMonth,
+    ),
+    paidMonths: monthsEvidence(
+      record.paidMonths.length ? record.paidMonths : null,
+      record,
+      paidStatus,
+      record.fieldConfidence.paidMonths,
+    ),
     pensionMonths: numberEvidence(
       record.pensionMonths,
       record,
-      record.pensionMonths === null ? "unsupported" : status,
+      record.pensionMonths === null
+        ? "unsupported"
+        : statusFor(record.fieldConfidence.pensionMonths),
+      record.fieldConfidence.pensionMonths,
     ),
     injuryMonths: numberEvidence(
       record.injuryMonths,
       record,
-      record.injuryMonths === null ? "unsupported" : status,
+      record.injuryMonths === null
+        ? "unsupported"
+        : statusFor(record.fieldConfidence.injuryMonths),
+      record.fieldConfidence.injuryMonths,
     ),
     unemploymentMonths: numberEvidence(
       record.unemploymentMonths,
       record,
-      record.unemploymentMonths === null ? "unsupported" : status,
+      record.unemploymentMonths === null
+        ? "unsupported"
+        : statusFor(record.fieldConfidence.unemploymentMonths),
+      record.fieldConfidence.unemploymentMonths,
     ),
     personalInsurance: /个人参保|个人缴费|灵活就业/.test(record.companyRaw),
     sourceFile: record.source.file,
@@ -483,7 +553,14 @@ function convertParsedRecord(
     sourceEvidence: [record.source.quote],
     template,
     warnings: [
-      ...(verified ? [] : ["OCR_CONFIDENCE_LOW"]),
+      ...([
+        companyStatus,
+        startStatus,
+        endStatus,
+        paidStatus,
+      ].every((status) => status === "verified")
+        ? []
+        : ["OCR_CONFIDENCE_LOW"]),
       ...(companyUncertain ? ["OCR_COMPANY_UNCERTAIN"] : []),
       ...(outsourcingOrDispatch ? ["OUTSOURCING_OR_DISPATCH"] : []),
     ],
@@ -504,6 +581,15 @@ function unsupportedSocialRecord(
     pensionMonths: null,
     injuryMonths: null,
     unemploymentMonths: null,
+    fieldConfidence: {
+      company: null,
+      startMonth: null,
+      endMonth: null,
+      paidMonths: null,
+      pensionMonths: null,
+      injuryMonths: null,
+      unemploymentMonths: null,
+    },
     source: { file: sourceFile, page, quote, confidence: null },
   };
   return {
@@ -544,13 +630,16 @@ async function structureStage(
   const issues: EvidenceIssue[] = [];
   const manualResume = resumePages.some((page) => page.extractionMethod === "manual_required");
   const deepSeekCacheKey = contentHash(
-    `deepseek-resume-v2:${JSON.stringify(
+    `${PIPELINE_VERSION}:deepseek-resume:${JSON.stringify(
       resumePages.map((page) => [page.selectedText, page.extractionMethod]),
     )}`,
   );
+  const cachedResume = readExtractionCache<ResumeEvidenceExtraction>(deepSeekCacheKey);
   let resume = manualResume
     ? missingResume(resumePages)
-    : readExtractionCache<ResumeEvidenceExtraction>(deepSeekCacheKey);
+    : ResumeEvidenceExtractionSchema.safeParse(cachedResume).success
+      ? ResumeEvidenceExtractionSchema.parse(cachedResume)
+      : null;
   if (!resume) {
     resume = await extractResumeWithEvidence(resumePages, (metric) => {
         recordApiCall({
@@ -664,7 +753,7 @@ async function processTask(task: TaskRow) {
   for (const file of files) {
     fileHashes.push(`${file.id}:${contentHash(await fileStorage.read(file.storage_key))}`);
   }
-  const cacheKey = contentHash(fileHashes.join("|"));
+  const cacheKey = contentHash(`${PIPELINE_VERSION}|${fileHashes.join("|")}`);
   const estimatedOCRCalls = await estimateOCRCalls(files);
   updateTask(task.id, {
     estimated_ocr_calls: estimatedOCRCalls,
@@ -673,10 +762,8 @@ async function processTask(task: TaskRow) {
   });
   assertOCRCapacity(estimatedOCRCalls, Boolean(task.paid_override));
 
-  let ocrPayload = readStageArtifact<OCRStagePayload>(
-    task.id,
-    "OCR_COMPLETED",
-    cacheKey,
+  let ocrPayload = parseOCRStageCache(
+    readStageArtifact<OCRStagePayload>(task.id, "OCR_COMPLETED", cacheKey),
   );
   if (!ocrPayload) {
     updateTask(task.id, { stage: "DOCUMENT_EXTRACTED", updated_at: new Date().toISOString() });
@@ -688,17 +775,21 @@ async function processTask(task: TaskRow) {
   }
   updateTask(task.id, { stage: "OCR_COMPLETED", updated_at: new Date().toISOString() });
 
-  let structured = readStageArtifact<StructuredPayload>(task.id, "STRUCTURED", cacheKey);
+  let structured = parseStructuredCache(
+    readStageArtifact<StructuredPayload>(task.id, "STRUCTURED", cacheKey),
+  );
   if (!structured) {
     structured = await structureStage(task, ocrPayload);
     writeStageArtifact(task.id, "STRUCTURED", cacheKey, structured);
   }
   updateTask(task.id, { stage: "STRUCTURED", updated_at: new Date().toISOString() });
 
-  let validated = readStageArtifact<StructuredPayload>(
-    task.id,
-    "EVIDENCE_VALIDATED",
-    cacheKey,
+  let validated = parseStructuredCache(
+    readStageArtifact<StructuredPayload>(
+      task.id,
+      "EVIDENCE_VALIDATED",
+      cacheKey,
+    ),
   );
   if (!validated) {
     const resumeValidation = validateResumeEvidence(structured.resume, ocrPayload.pages);
