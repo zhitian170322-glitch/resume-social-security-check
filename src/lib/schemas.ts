@@ -93,6 +93,106 @@ export const VerificationResultSchema = z
   })
   .strict();
 
+export const EvidenceStatusSchema = z.enum([
+  "verified",
+  "uncertain",
+  "missing",
+  "unsupported",
+]);
+
+export const ExtractionMethodSchema = z.enum([
+  "pdf_text",
+  "ocr",
+  "table_ocr",
+  "deepseek",
+]);
+
+const evidenceBase = {
+  status: EvidenceStatusSchema,
+  sourceFile: z.string().min(1),
+  sourcePage: z.number().int().positive(),
+  sourceQuote: z.string(),
+  extractionMethod: ExtractionMethodSchema,
+  confidence: z.number().min(0).max(1),
+};
+
+export const EvidenceStringFieldSchema = z
+  .object({ value: z.string().min(1).nullable(), ...evidenceBase })
+  .strict();
+
+export const EvidenceMonthFieldSchema = z
+  .object({ value: YearMonthSchema.nullable(), ...evidenceBase })
+  .strict();
+
+export const EvidenceNumberFieldSchema = z
+  .object({ value: z.number().int().nonnegative().nullable(), ...evidenceBase })
+  .strict();
+
+export const EvidenceMonthsFieldSchema = z
+  .object({ value: z.array(YearMonthSchema).nullable(), ...evidenceBase })
+  .strict();
+
+export const DocumentPageSchema = z
+  .object({
+    page: z.number().int().positive(),
+    sourceFile: z.string().min(1),
+    pdfText: z.string().nullable(),
+    ocrText: z.string().nullable(),
+    selectedText: z.string().nullable(),
+    extractionMethod: z.enum(["pdf_text", "ocr", "hybrid", "manual_required"]),
+    qualityScore: z.number().min(0).max(100),
+    ocrConfidence: z.number().min(0).max(1).nullable(),
+    warnings: z.array(z.string()),
+  })
+  .strict();
+
+export const ResumeEvidenceExperienceSchema = z
+  .object({
+    resumeCompany: EvidenceStringFieldSchema,
+    resumeStartMonth: EvidenceMonthFieldSchema,
+    resumeEndMonth: EvidenceMonthFieldSchema,
+    warnings: z.array(z.string()).default([]),
+  })
+  .strict();
+
+export const ResumeEvidenceExtractionSchema = z
+  .object({
+    candidateName: EvidenceStringFieldSchema,
+    experiences: z.array(ResumeEvidenceExperienceSchema),
+  })
+  .strict();
+
+export const SocialSecurityEvidenceRecordSchema = z
+  .object({
+    companyRaw: EvidenceStringFieldSchema,
+    companyNormalized: z.string().nullable(),
+    startMonth: EvidenceMonthFieldSchema,
+    endMonth: EvidenceMonthFieldSchema,
+    paidMonths: EvidenceMonthsFieldSchema,
+    pensionMonths: EvidenceNumberFieldSchema,
+    injuryMonths: EvidenceNumberFieldSchema,
+    unemploymentMonths: EvidenceNumberFieldSchema,
+    personalInsurance: z.boolean(),
+    sourceFile: z.string().min(1),
+    sourcePage: z.number().int().positive(),
+    sourceEvidence: z.array(z.string()).min(1),
+    template: z.enum(["shenzhen", "guangdong", "generic"]),
+    warnings: z.array(z.string()).default([]),
+  })
+  .strict();
+
+export const VerificationV2StatusSchema = z.enum([
+  "EXACT_MATCH",
+  "COMPANY_MISMATCH",
+  "TIME_MISMATCH",
+  "RESUME_ONLY",
+  "SOCIAL_SECURITY_ONLY",
+  "GAP_DETECTED",
+  "PERSONAL_INSURANCE",
+  "EXTRACTION_UNCERTAIN",
+  "MANUAL_REVIEW_REQUIRED",
+]);
+
 export type ResumeRecord = z.infer<typeof ResumeRecordSchema>;
 export type SocialSecurityRecord = z.infer<
   typeof SocialSecurityRecordSchema
@@ -103,6 +203,19 @@ export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
 export type VerificationInput = z.output<typeof VerificationInputSchema>;
 export type ParsedVerificationInput = VerificationInput;
 export type VerificationResult = z.infer<typeof VerificationResultSchema>;
+export type EvidenceStatus = z.infer<typeof EvidenceStatusSchema>;
+export type ExtractionMethod = z.infer<typeof ExtractionMethodSchema>;
+export type EvidenceStringField = z.infer<typeof EvidenceStringFieldSchema>;
+export type EvidenceMonthField = z.infer<typeof EvidenceMonthFieldSchema>;
+export type EvidenceNumberField = z.infer<typeof EvidenceNumberFieldSchema>;
+export type EvidenceMonthsField = z.infer<typeof EvidenceMonthsFieldSchema>;
+export type DocumentPage = z.infer<typeof DocumentPageSchema>;
+export type ResumeEvidenceExperience = z.infer<typeof ResumeEvidenceExperienceSchema>;
+export type ResumeEvidenceExtraction = z.infer<typeof ResumeEvidenceExtractionSchema>;
+export type SocialSecurityEvidenceRecord = z.infer<
+  typeof SocialSecurityEvidenceRecordSchema
+>;
+export type VerificationV2Status = z.infer<typeof VerificationV2StatusSchema>;
 
 // Conventional camel-case exports are provided for consumers that name schemas
 // after their domain values.

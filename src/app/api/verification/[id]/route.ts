@@ -33,11 +33,21 @@ export async function PATCH(
   context: { params: Promise<{ id: string }> },
 ) {
   const { id } = await context.params;
-  const body = (await request.json()) as { paidOverride?: boolean };
+  const body = (await request.json()) as { paidOverride?: boolean; retry?: boolean };
   const task = db.prepare("SELECT * FROM verification_tasks WHERE id = ?").get(id) as
     | TaskRow
     | undefined;
   if (!task) return NextResponse.json({ message: "记录不存在" }, { status: 404 });
+  if (body.retry === true && task.status === "FAILED") {
+    db.prepare(
+      `UPDATE verification_tasks
+       SET status = 'PENDING', stage = 'FILES_SAVED', error_code = NULL, error_message = NULL,
+           updated_at = ?
+       WHERE id = ?`,
+    ).run(new Date().toISOString(), id);
+    kickWorker();
+    return NextResponse.json({ accepted: true, resumeFromCache: true });
+  }
   if (task.stage !== "AWAITING_OCR_CONFIRMATION" || body.paidOverride !== true) {
     return NextResponse.json({ message: "当前任务不接受此操作" }, { status: 409 });
   }

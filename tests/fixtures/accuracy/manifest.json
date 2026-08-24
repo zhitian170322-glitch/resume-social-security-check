@@ -1,0 +1,22 @@
+[
+  {"id":"single-column-resume","kind":"resume","format":"pdf_text","risk":"baseline"},
+  {"id":"two-column-resume","kind":"resume","format":"pdf_text+ocr","risk":"text_order"},
+  {"id":"table-resume","kind":"resume","format":"pdf_text+ocr","risk":"table_loss"},
+  {"id":"scanned-resume","kind":"resume","format":"ocr","risk":"no_text_layer"},
+  {"id":"image-resume","kind":"resume","format":"image","risk":"ocr_confidence"},
+  {"id":"shenzhen-social-security","kind":"social_security","format":"table_ocr","risk":"unit_mapping"},
+  {"id":"guangdong-social-security","kind":"social_security","format":"table_ocr","risk":"column_mapping"},
+  {"id":"multi-page-social-security","kind":"social_security","format":"table_ocr","risk":"page_merge"},
+  {"id":"mobile-screenshot","kind":"social_security","format":"image","risk":"crop_rotation"},
+  {"id":"low-resolution","kind":"social_security","format":"image","risk":"low_confidence"},
+  {"id":"watermark","kind":"document","format":"image","risk":"text_overlap"},
+  {"id":"official-seal","kind":"social_security","format":"image","risk":"seal_occlusion"},
+  {"id":"company-short-name","kind":"comparison","format":"structured","risk":"manual_candidate"},
+  {"id":"company-one-character-difference","kind":"comparison","format":"structured","risk":"raw_mismatch"},
+  {"id":"date-ocr-error","kind":"comparison","format":"structured","risk":"controlled_numeric_correction"},
+  {"id":"outsourcing-employment","kind":"comparison","format":"structured","risk":"manual_review"},
+  {"id":"personal-insurance","kind":"social_security","format":"table_ocr","risk":"manual_review"},
+  {"id":"payment-gap","kind":"social_security","format":"table_ocr","risk":"gap"},
+  {"id":"social-security-extra-company","kind":"comparison","format":"structured","risk":"undisclosed"},
+  {"id":"resume-extra-company","kind":"comparison","format":"structured","risk":"unsupported"}
+]

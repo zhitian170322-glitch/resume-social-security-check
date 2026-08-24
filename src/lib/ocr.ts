@@ -6,7 +6,12 @@ import { RuntimeOptions } from "@alicloud/tea-util";
 import { config } from "./config";
 import { db } from "./db";
 
-export type OCRResult = { text: string; raw: unknown };
+export type OCRResult = {
+  text: string;
+  raw: unknown;
+  confidence: number | null;
+  requestId?: string;
+};
 export interface OCRProvider {
   recognize(input: Buffer, mimeType: string): Promise<OCRResult>;
 }
@@ -14,7 +19,7 @@ export interface OCRProvider {
 export class MockOCRProvider implements OCRProvider {
   constructor(private readonly text = "模拟 OCR 识别文字") {}
   async recognize(): Promise<OCRResult> {
-    return { text: this.text, raw: { mock: true } };
+    return { text: this.text, raw: { mock: true }, confidence: 1, requestId: "mock" };
   }
 }
 
@@ -52,8 +57,30 @@ export class AliyunOCRProvider implements OCRProvider {
     const raw = response.body?.data ? JSON.parse(response.body.data) : {};
     const text = extractAliyunText(raw);
     if (!text) throw new Error(response.body?.message || "OCR 未返回文字");
-    return { text, raw };
+    return {
+      text,
+      raw,
+      confidence: extractAliyunConfidence(raw),
+      requestId: response.body?.requestId,
+    };
   }
+}
+
+function extractAliyunConfidence(value: unknown): number | null {
+  if (!value || typeof value !== "object") return null;
+  const words = (value as Record<string, unknown>).prism_wordsInfo;
+  if (!Array.isArray(words)) return null;
+  const probabilities = words
+    .map((word) =>
+      word && typeof word === "object" && typeof word.prob === "number"
+        ? word.prob
+        : null,
+    )
+    .filter((probability): probability is number => probability !== null);
+  if (!probabilities.length) return null;
+  return probabilities.reduce((sum, probability) => sum + probability, 0) /
+    probabilities.length /
+    100;
 }
 
 function extractAliyunText(value: unknown): string {
@@ -87,6 +114,7 @@ export function assertOCRCapacity(
   paidOverride: boolean,
   usage = currentMonthOCRUsage(),
 ) {
+  if (estimatedCalls === 0) return;
   if (usage + estimatedCalls >= config.OCR_MONTHLY_ABSOLUTE_LIMIT) {
     throw new OCRLimitError("OCR_ABSOLUTE_LIMIT", "OCR 月度绝对熔断已触发");
   }
@@ -98,10 +126,14 @@ export function assertOCRCapacity(
   }
 }
 
-export function recordOCRCall(taskId: string, paidOverride: boolean) {
+export function recordOCRCall(
+  taskId: string,
+  paidOverride: boolean,
+  apiType = "RecognizeGeneral",
+) {
   db.prepare(
     `INSERT INTO ocr_calls
       (id, task_id, provider, api_type, created_at, paid_override, estimated_cost)
-     VALUES (?, ?, 'aliyun', 'RecognizeGeneral', ?, ?, 0)`,
-  ).run(randomUUID(), taskId, new Date().toISOString(), paidOverride ? 1 : 0);
+     VALUES (?, ?, 'aliyun', ?, ?, ?, 0)`,
+  ).run(randomUUID(), taskId, apiType, new Date().toISOString(), paidOverride ? 1 : 0);
 }

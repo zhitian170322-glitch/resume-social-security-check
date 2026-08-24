@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { VerificationReport } from "@/lib/result";
+import type { VerificationReportV2 } from "@/lib/result";
 import type { VerificationResult } from "@/lib/schemas";
+import { EvidenceResultView } from "./evidence-result-view";
 
 const statusNames: Record<string, string> = {
   MATCHED: "完全一致",
@@ -54,7 +56,7 @@ function allText(report: VerificationReport, onlyAnomalies = false) {
 }
 
 export function ResultView({ taskId }: { taskId: string }) {
-  const [report, setReport] = useState<VerificationReport | null>(null);
+  const [report, setReport] = useState<VerificationReport | VerificationReportV2 | null>(null);
   const [message, setMessage] = useState("");
   useEffect(() => {
     fetch(`/api/verification/${taskId}`, { cache: "no-store" })
@@ -72,6 +74,32 @@ export function ResultView({ taskId }: { taskId: string }) {
   }
 
   if (!report) return <main className="shell"><div className="empty">正在读取核验结果…</div></main>;
+  if ("schemaVersion" in report && report.schemaVersion === 2) {
+    const text = [
+      `候选人：${report.candidateName}`,
+      `核验结论：${report.summary.conclusion}`,
+      ...report.items.map(
+        (item, index) => `${index + 1}. ${item.status}：${item.description}`,
+      ),
+    ].join("\n");
+    return (
+      <main className="shell">
+        <header className="result-header">
+          <div>
+            <p className="eyebrow">可审计核验结果</p>
+            <h1>{report.candidateName}</h1>
+          </div>
+          <nav>
+            <button className="soft-button" onClick={() => copy(text)}>复制全部</button>
+            <Link className="soft-button" href="/history">历史记录</Link>
+            <Link className="soft-button" href="/">新建核验</Link>
+          </nav>
+        </header>
+        <EvidenceResultView report={report} copy={copy} />
+        {message && <div className="toast">{message}</div>}
+      </main>
+    );
+  }
   const stats = [
     ["简历声明经历", report.summary.resumeExperienceCount],
     ["社保实际单位", report.summary.socialSecurityCompanyCount],
@@ -109,6 +137,10 @@ export function ResultView({ taskId }: { taskId: string }) {
         <p>核验结果以社保记录为基准 · {report.summary.conclusion}
           <button className="copy-button" onClick={() => copy(report.summary.conclusion)}>复制</button>
         </p>
+      </section>
+      <section className="summary-card evidence-warning">
+        <strong>旧版本任务，无完整证据链</strong>
+        <p>以下结果按历史结构展示，不能追溯到字段级原文证据，建议人工复核。</p>
       </section>
       <section className="stat-grid">
         {stats.map(([label, value]) => <div className="stat" key={label}><span>{label}</span><b>{value}</b></div>)}

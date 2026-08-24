@@ -24,6 +24,37 @@ db.exec(`
     provider TEXT NOT NULL, api_type TEXT NOT NULL, created_at TEXT NOT NULL,
     paid_override INTEGER NOT NULL DEFAULT 0, estimated_cost REAL NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS task_stage_artifacts (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES verification_tasks(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL, cache_key TEXT NOT NULL, payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(task_id, stage, cache_key)
+  );
+  CREATE TABLE IF NOT EXISTS extraction_cache (
+    cache_key TEXT PRIMARY KEY, provider TEXT NOT NULL, api_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS api_calls (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES verification_tasks(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL, api_type TEXT NOT NULL, source_page INTEGER,
+    http_status INTEGER, error_code TEXT, request_id TEXT, duration_ms INTEGER NOT NULL,
+    cache_hit INTEGER NOT NULL DEFAULT 0, estimated_cost REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
 `);
+const columns = new Set(db.prepare("PRAGMA table_info(verification_tasks)").all().map((row) => row.name));
+for (const definition of [
+  "schema_version INTEGER NOT NULL DEFAULT 1",
+  "ocr_pages INTEGER NOT NULL DEFAULT 0",
+  "deepseek_calls INTEGER NOT NULL DEFAULT 0",
+  "estimated_cost REAL NOT NULL DEFAULT 0",
+]) {
+  const name = definition.split(/\s+/, 1)[0];
+  if (!columns.has(name)) db.exec(`ALTER TABLE verification_tasks ADD COLUMN ${definition}`);
+}
+db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)")
+  .run(new Date().toISOString());
 db.close();
 console.log(`Database initialized: ${path}`);

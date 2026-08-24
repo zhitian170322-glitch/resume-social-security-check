@@ -1,5 +1,6 @@
 services:
   app:
+    container_name: resume-social-security-check-app
     build:
       context: .
       dockerfile: Dockerfile
@@ -12,6 +13,10 @@ services:
       REPORT_DIR: /data/reports
     volumes:
       - app-data:/data
+    expose:
+      - "3000"
+    ports:
+      - "127.0.0.1:${APP_PORT:-3100}:3000"
     mem_limit: 1400m
     cpus: 1.75
     healthcheck:
@@ -19,19 +24,6 @@ services:
       interval: 20s
       timeout: 5s
       retries: 5
-
-  nginx:
-    build: ./deploy/nginx
-    restart: unless-stopped
-    depends_on:
-      app:
-        condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/certs:/etc/nginx/certs
-    mem_limit: 128m
 
 volumes:
   app-data:

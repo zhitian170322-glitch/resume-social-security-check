@@ -4,11 +4,11 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 const stages = [
-  ["RESUME_READ", "已读取简历"],
-  ["SOCIAL_SECURITY_READ", "已读取社保材料"],
-  ["OCR_PROCESSING", "正在识别社保证明"],
-  ["EXTRACTING", "正在提取工作经历"],
-  ["VERIFYING", "正在执行严格核验"],
+  ["DOCUMENT_EXTRACTED", "已完成文档原始提取"],
+  ["OCR_COMPLETED", "已完成页面级 OCR"],
+  ["STRUCTURED", "已完成证据字段结构化"],
+  ["EVIDENCE_VALIDATED", "已完成原文证据校验"],
+  ["VERIFIED", "已完成确定性核验"],
   ["COMPLETED", "已生成核验结果"],
 ] as const;
 
@@ -61,6 +61,15 @@ export function ProcessingView({ taskId }: { taskId: string }) {
     window.location.reload();
   }
 
+  async function retryFailedStage() {
+    await fetch(`/api/verification/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retry: true }),
+    });
+    window.location.reload();
+  }
+
   const current = stages.findIndex(([key]) => key === task.stage);
   return (
     <main className="shell narrow">
@@ -84,6 +93,7 @@ export function ProcessingView({ taskId }: { taskId: string }) {
           <div className="error-panel">
             <strong>任务处理失败</strong>
             <p>{task.errorMessage || task.errorCode}</p>
+            <button onClick={retryFailedStage}>从失败阶段重试</button>
             <button onClick={() => router.push("/")}>返回工作台</button>
           </div>
         )}
