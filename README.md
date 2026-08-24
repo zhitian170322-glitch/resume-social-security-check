@@ -23,14 +23,31 @@ npm run test
 npm run build
 ```
 
-## Docker 部署
+## Docker 与现有 Caddy 部署
 
 1. 将 `.env.example` 复制为 `.env`，仅在服务器填写 DeepSeek 与阿里云 RAM 凭证。
-2. 将正式证书放到 `deploy/certs/fullchain.pem` 和 `deploy/certs/privkey.pem`。未提供时容器只会生成短期自签名证书，供启动检查使用。
-3. 执行 `docker compose up -d --build`。
-4. 用 `docker compose ps`、`docker stats --no-stream`、`free -h` 和 `df -h` 检查状态。
+2. 执行 `docker compose up -d --build`。
+3. 用 `docker compose ps`、`docker stats --no-stream`、`free -h` 和 `df -h` 检查状态。
 
-Nginx 默认对请求设置 `client_max_body_size 20M`，仅核验多文件上传接口按需求允许总计 50MB（预留 multipart 开销为 52MB）。上传目录没有静态路由，不能从公网访问。
+Compose 只将应用绑定到宿主机 `127.0.0.1:${APP_PORT:-3100}`，不启动新的
+Nginx，也不占用 80/443。生产流量保持
+`check.orangeito.com → orangeito-caddy → resume-social-security-check-app:3000`。
+如果 Caddy 在容器内运行，只需把应用容器接入 Caddy 已有 Docker network；禁止修改
+`/opt/orangeito`。Caddy 上传上限应允许 52MB multipart 请求，应用仍逐文件限制 20MB、
+单任务总量限制 50MB。上传目录没有静态路由。
+
+## P0 准确率流水线
+
+- 简历逐页评估原生 PDF 文本；双栏、表格、错序或低质量页执行 OCR 双通道比较。
+- 社保页使用阿里云 `RecognizeTableOcr`，保留 cells/rows/columns，再进入深圳、广东或通用模板 Parser。
+- DeepSeek 只定位简历经历候选区块；所有输出必须引用同页、同一段连续原文。
+- Evidence Validator 验证 quote、公司原文和受控月份转换；失败字段不能进入自动核验。
+- 只有公司原文、时间和社保证据全部验证通过才可能输出 `EXACT_MATCH`。
+- 未知模板、低置信度、PDF/OCR冲突、疑似同主体、外包/派遣及个人参保均转人工复核。
+- 阶段结果和 OCR 页面按 SHA-256 缓存，失败从当前阶段重试，不重复成功的付费识别。
+
+数据库 migration 只新增列和表。旧记录保留 `schema_version=1`，结果页显示
+“旧版本任务，无完整证据链”；新版任务使用 `schema_version=2`。
 
 ## 2C2G 服务器与 Swap
 
@@ -52,6 +69,7 @@ Swap 不能作为正常工作内存。应用容器限制为 1400MB，任务由 S
 - 原始文件最长保留 7 天；服务启动时和之后每 24 小时自动清理。
 - PDF 转图等中间文件在每页处理后立即删除。
 - 结构化数据、核验结果、OCR 文字和 OCR 调用统计长期保留。
+- 每个新版任务记录 OCR 页数、OCR/DeepSeek 调用次数、缓存命中及预估成本。
 - 手动清理可执行 `npm run cleanup`。
 
 ## 回滚
