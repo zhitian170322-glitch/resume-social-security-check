@@ -56,17 +56,31 @@ import {
   type SocialSecurityEvidenceRecord,
   SocialSecurityEvidenceRecordSchema,
 } from "./schemas";
-import { verifyEvidenceRecords, type VerificationV2Item } from "./verification-engine-v2";
+import type { Phase8VerificationResult } from "./verification-engine-phase8";
 import { createEvidenceReport } from "./result";
 import { safeErrorMessage } from "./errors";
 import {
   contentHash,
   readExtractionCache,
-  readStageArtifact,
+  readVersionedStageArtifact,
   writeExtractionCache,
-  writeStageArtifact,
+  writeVersionedStageArtifact,
+  type PipelineArtifactVersions,
 } from "./stage-cache";
 import { logSafeEvent, recordApiCall } from "./observability";
+import {
+  EVIDENCE_VALIDATOR_VERSION,
+  PARSER_VERSION,
+  PipelineIntegrationError,
+  VERIFICATION_ENGINE_VERSION,
+  assertPipelineVersions,
+  createEvidenceValidationStage,
+  runIntegratedVerification,
+  validatedEvidenceSet,
+  verificationResultForStorage,
+  type DerivedFactsPayload,
+  type EvidenceValidationStagePayload,
+} from "./worker-pipeline-integration";
 
 type FileRow = {
   id: string;
@@ -94,13 +108,21 @@ type StructuredPayload = {
 };
 
 const workerGlobal = globalThis as typeof globalThis & { verificationWorkerRunning?: boolean };
-const PIPELINE_VERSION = "evidence-v2.2-phase6";
+export const PIPELINE_VERSIONS: PipelineArtifactVersions = {
+  taskSchemaVersion: EVIDENCE_TASK_SCHEMA_VERSION,
+  extractionVersion: DOCUMENT_EXTRACTION_VERSION,
+  ocrVersion: config.SOCIAL_SECURITY_OCR_VERSION,
+  parserVersion: PARSER_VERSION,
+  evidenceValidatorVersion: EVIDENCE_VALIDATOR_VERSION,
+  verificationEngineVersion: VERIFICATION_ENGINE_VERSION,
+};
+const PIPELINE_VERSION = `evidence-v2.5:${JSON.stringify(PIPELINE_VERSIONS)}`;
 
 export function isEvidencePipelineTask(
   task: Pick<TaskRow, "task_schema_version" | "extraction_version">,
 ) {
   return (
-    task.task_schema_version >= EVIDENCE_TASK_SCHEMA_VERSION &&
+    task.task_schema_version === EVIDENCE_TASK_SCHEMA_VERSION &&
     task.extraction_version === DOCUMENT_EXTRACTION_VERSION
   );
 }
@@ -116,6 +138,65 @@ function parseStructuredCache(value: StructuredPayload | null): StructuredPayloa
   } catch {
     return null;
   }
+}
+
+function parseEvidenceValidationCache(
+  value: EvidenceValidationStagePayload | null,
+): EvidenceValidationStagePayload | null {
+  if (!value) return null;
+  const statuses = new Set([
+    "VALIDATED",
+    "UNCERTAIN",
+    "CONFLICT",
+    "UNSUPPORTED",
+  ]);
+  if (
+    !statuses.has(value.validationStatus) ||
+    !statuses.has(value.resume?.validationStatus) ||
+    !statuses.has(value.socialSecurity?.validationStatus) ||
+    !Array.isArray(value.issues) ||
+    !Number.isInteger(value.evidenceCount)
+  ) {
+    return null;
+  }
+  try {
+    return {
+      ...value,
+      resume: {
+        ...value.resume,
+        evidence: ResumeEvidenceExtractionSchema.parse(
+          value.resume.evidence,
+        ),
+      },
+      socialSecurity: {
+        ...value.socialSecurity,
+        evidence: SocialSecurityEvidenceRecordSchema.array().parse(
+          value.socialSecurity.evidence,
+        ),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseVerificationCache(
+  value: Phase8VerificationResult | null,
+): Phase8VerificationResult | null {
+  if (
+    !value ||
+    ![
+      "CONSISTENT",
+      "INCONSISTENT",
+      "PARTIALLY_CONSISTENT",
+      "INSUFFICIENT_EVIDENCE",
+      "MANUAL_REVIEW_REQUIRED",
+    ].includes(value.conclusion) ||
+    !Array.isArray(value.items)
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function parseOCRStageCache(value: OCRStagePayload | null): OCRStagePayload | null {
@@ -144,7 +225,7 @@ function claimNextTask(): TaskRow | null {
       .prepare(
         `SELECT * FROM verification_tasks
          WHERE status = 'PENDING' AND stage = 'FILES_SAVED'
-           AND task_schema_version >= ?
+           AND task_schema_version = ?
            AND extraction_version = ?
          ORDER BY created_at LIMIT 1`,
       )
@@ -269,7 +350,7 @@ function socialSecurityOCRProvider(
     logSafeEvent(metric.errorCode ? "error" : "info", {
       taskId: task.id,
       documentId,
-      stage: "OCR_COMPLETED",
+      stage: "OCR_COMPLETE",
       provider: "aliyun",
       apiType,
       page,
@@ -404,7 +485,7 @@ async function extractOCRStage(
         onOCRCall(page, result) {
           logSafeEvent("info", {
             taskId: task.id,
-            stage: "OCR_COMPLETED",
+            stage: "OCR_COMPLETE",
             provider: "aliyun-general",
             page,
             requestId: result.requestId,
@@ -947,6 +1028,15 @@ function usageForTask(taskId: string) {
 }
 
 async function processTask(task: TaskRow) {
+  assertPipelineVersions({
+    taskSchemaVersion: task.task_schema_version,
+    extractionVersion: task.extraction_version,
+    versions: PIPELINE_VERSIONS,
+  });
+  updateTask(task.id, {
+    stage: "DOCUMENT_INGESTED",
+    updated_at: new Date().toISOString(),
+  });
   const files = db
     .prepare(
       `SELECT task_files.*, documents.id AS document_id,
@@ -983,6 +1073,32 @@ async function processTask(task: TaskRow) {
     }
   }
   const cacheKey = contentHash(`${PIPELINE_VERSION}|${fileHashes.join("|")}`);
+  writeVersionedStageArtifact({
+    taskId: task.id,
+    stage: "DOCUMENT_INGESTED",
+    cacheKey,
+    versions: PIPELINE_VERSIONS,
+    payload: {
+      taskSchemaVersion: task.task_schema_version,
+      extractionVersion: task.extraction_version,
+      fileCount: files.length,
+      fileHashes,
+    },
+  });
+  writeVersionedStageArtifact({
+    taskId: task.id,
+    stage: "EXTRACTION_COMPLETE",
+    cacheKey,
+    versions: PIPELINE_VERSIONS,
+    payload: {
+      fileHashes,
+      pdfDocumentCount: pdfAnalyses.size,
+    },
+  });
+  updateTask(task.id, {
+    stage: "EXTRACTION_COMPLETE",
+    updated_at: new Date().toISOString(),
+  });
   const estimatedOCRCalls = await estimateOCRCalls(files, pdfAnalyses);
   updateTask(task.id, {
     estimated_ocr_calls: estimatedOCRCalls,
@@ -992,79 +1108,167 @@ async function processTask(task: TaskRow) {
   assertOCRCapacity(estimatedOCRCalls, Boolean(task.paid_override));
 
   let ocrPayload = parseOCRStageCache(
-    readStageArtifact<OCRStagePayload>(task.id, "OCR_COMPLETED", cacheKey),
+    readVersionedStageArtifact<OCRStagePayload>({
+      taskId: task.id,
+      stage: "OCR_COMPLETE",
+      cacheKey,
+      versions: PIPELINE_VERSIONS,
+    }),
   );
   if (!ocrPayload) {
-    updateTask(task.id, { stage: "DOCUMENT_EXTRACTED", updated_at: new Date().toISOString() });
     ocrPayload = await extractOCRStage(
       task,
       resumeFile,
       socialFiles,
       pdfAnalyses,
     );
-    writeStageArtifact(task.id, "DOCUMENT_EXTRACTED", cacheKey, {
-      pages: ocrPayload.pages.map((page) => ({ ...page, ocrText: null })),
+    writeVersionedStageArtifact({
+      taskId: task.id,
+      stage: "OCR_COMPLETE",
+      cacheKey,
+      versions: PIPELINE_VERSIONS,
+      payload: ocrPayload,
     });
-    writeStageArtifact(task.id, "OCR_COMPLETED", cacheKey, ocrPayload);
   }
-  updateTask(task.id, { stage: "OCR_COMPLETED", updated_at: new Date().toISOString() });
+  updateTask(task.id, {
+    stage: "OCR_COMPLETE",
+    updated_at: new Date().toISOString(),
+  });
 
   let structured = parseStructuredCache(
-    readStageArtifact<StructuredPayload>(task.id, "STRUCTURED", cacheKey),
+    readVersionedStageArtifact<StructuredPayload>({
+      taskId: task.id,
+      stage: "STRUCTURED",
+      cacheKey,
+      versions: PIPELINE_VERSIONS,
+    }),
   );
   if (!structured) {
     structured = await structureStage(task, ocrPayload);
-    writeStageArtifact(task.id, "STRUCTURED", cacheKey, structured);
+    writeVersionedStageArtifact({
+      taskId: task.id,
+      stage: "STRUCTURED",
+      cacheKey,
+      versions: PIPELINE_VERSIONS,
+      payload: structured,
+    });
   }
   updateTask(task.id, { stage: "STRUCTURED", updated_at: new Date().toISOString() });
 
-  let validated = parseStructuredCache(
-    readStageArtifact<StructuredPayload>(
-      task.id,
-      "EVIDENCE_VALIDATED",
+  let validated = parseEvidenceValidationCache(
+    readVersionedStageArtifact<EvidenceValidationStagePayload>({
+      taskId: task.id,
+      stage: "EVIDENCE_VALIDATED",
       cacheKey,
-    ),
+      versions: PIPELINE_VERSIONS,
+    }),
   );
   if (!validated) {
-    const resumeValidation = validateResumeEvidence(structured.resume, ocrPayload.pages);
-    const socialValidation = validateSocialEvidence(structured.social, ocrPayload.pages);
-    validated = {
-      resume: resumeValidation.value,
-      social: socialValidation.value,
-      issues: [
-        ...structured.issues,
-        ...resumeValidation.issues,
-        ...socialValidation.issues,
-      ],
-    };
-    writeStageArtifact(task.id, "EVIDENCE_VALIDATED", cacheKey, validated);
-  }
-  updateTask(task.id, { stage: "EVIDENCE_VALIDATED", updated_at: new Date().toISOString() });
-
-  let items = readStageArtifact<VerificationV2Item[]>(task.id, "VERIFIED", cacheKey);
-  if (!items) {
-    items = verifyEvidenceRecords({
-      resumeExperiences: validated.resume.experiences,
-      socialSecurityRecords: validated.social,
-    });
-    if (!items.length || validated.issues.length) {
-      items.push({
-        status: "MANUAL_REVIEW_REQUIRED",
-        description: "存在未通过证据校验的页面或字段，禁止自动形成核验结论",
-        rules: ["Evidence Validator 失败必须人工复核"],
+    try {
+      const resumeValidation = validateResumeEvidence(
+        structured.resume,
+        ocrPayload.pages,
+      );
+      const socialValidation = validateSocialEvidence(
+        structured.social,
+        ocrPayload.pages,
+      );
+      validated = createEvidenceValidationStage({
+        versions: PIPELINE_VERSIONS,
+        resumeValidation,
+        socialValidation,
+        upstreamIssues: structured.issues,
       });
+    } catch (error) {
+      throw new PipelineIntegrationError(
+        "EVIDENCE_VALIDATION_FAILED",
+        error instanceof Error ? error.message : "Evidence Validator failed",
+      );
     }
-    writeStageArtifact(task.id, "VERIFIED", cacheKey, items);
+    writeVersionedStageArtifact({
+      taskId: task.id,
+      stage: "EVIDENCE_VALIDATED",
+      cacheKey,
+      versions: PIPELINE_VERSIONS,
+      payload: validated,
+    });
   }
-  updateTask(task.id, { stage: "VERIFIED", updated_at: new Date().toISOString() });
+  updateTask(task.id, {
+    stage: "EVIDENCE_VALIDATED",
+    updated_at: new Date().toISOString(),
+  });
+  logSafeEvent("info", {
+    taskId: task.id,
+    stage: "EVIDENCE_VALIDATED",
+    version: PIPELINE_VERSIONS.evidenceValidatorVersion,
+    evidenceCount: validated.evidenceCount,
+    validationStatus: validated.validationStatus,
+  });
+
+  const verificationCacheKey = contentHash(
+    `${cacheKey}|${contentHash(JSON.stringify(validated))}`,
+  );
+  const validatedSet = validatedEvidenceSet(validated);
+  let derivedFacts = readVersionedStageArtifact<DerivedFactsPayload>({
+    taskId: task.id,
+    stage: "DERIVED_FACTS",
+    cacheKey: verificationCacheKey,
+    versions: PIPELINE_VERSIONS,
+  });
+  let verificationResult = parseVerificationCache(
+    readVersionedStageArtifact<Phase8VerificationResult>({
+      taskId: task.id,
+      stage: "VERIFICATION_COMPLETE",
+      cacheKey: verificationCacheKey,
+      versions: PIPELINE_VERSIONS,
+    }),
+  );
+  if (!verificationResult || (validatedSet && !derivedFacts)) {
+    const integrated = runIntegratedVerification({
+      validationStage: validated,
+      onDerivedFacts: (facts) => {
+        derivedFacts = facts;
+        writeVersionedStageArtifact({
+          taskId: task.id,
+          stage: "DERIVED_FACTS",
+          cacheKey: verificationCacheKey,
+          versions: PIPELINE_VERSIONS,
+          payload: facts,
+        });
+      },
+    });
+    verificationResult = verificationResultForStorage(
+      integrated.verificationResult,
+    );
+    writeVersionedStageArtifact({
+      taskId: task.id,
+      stage: "VERIFICATION_COMPLETE",
+      cacheKey: verificationCacheKey,
+      versions: PIPELINE_VERSIONS,
+      payload: verificationResult,
+    });
+  }
+  updateTask(task.id, {
+    stage: "VERIFICATION_COMPLETE",
+    updated_at: new Date().toISOString(),
+  });
+  logSafeEvent("info", {
+    taskId: task.id,
+    stage: "VERIFICATION_COMPLETE",
+    version: PIPELINE_VERSIONS.verificationEngineVersion,
+    evidenceCount: validated.evidenceCount,
+    validationStatus: validated.validationStatus,
+    verificationStatus: verificationResult.conclusion,
+  });
   const usage = usageForTask(task.id);
   const report = createEvidenceReport({
-    candidateName: validated.resume.candidateName.value ?? "姓名待人工确认",
+    candidateName:
+      validated.resume.evidence.candidateName.value ?? "姓名待人工确认",
     documentPages: ocrPayload.pages,
-    resumeExtraction: validated.resume,
-    socialSecurityRecords: validated.social,
+    resumeExtraction: validated.resume.evidence,
+    socialSecurityRecords: validated.socialSecurity.evidence,
     evidenceIssues: validated.issues,
-    items,
+    items: verificationResult.items,
     usage,
   });
   const now = new Date().toISOString();
@@ -1073,7 +1277,7 @@ async function processTask(task: TaskRow) {
     stage: "COMPLETED",
     candidate_name: report.candidateName,
     resume_json: JSON.stringify(validated.resume),
-    social_security_json: JSON.stringify(validated.social),
+    social_security_json: JSON.stringify(validated.socialSecurity),
     result_json: JSON.stringify(report),
     ocr_pages: usage.ocrPages,
     deepseek_calls: usage.deepseekCalls,
@@ -1085,6 +1289,7 @@ async function processTask(task: TaskRow) {
 
 function classifyError(error: unknown) {
   const text = error instanceof Error ? error.message : "";
+  if (error instanceof PipelineIntegrationError) return error.code;
   if (error instanceof SocialSecurityOCRError) return error.code;
   if (text.includes("PDF_PARSE_FAILED")) return "PDF_PARSE_FAILED";
   if (
@@ -1129,6 +1334,7 @@ async function runWorker() {
           taskId: task.id,
           stage: current?.stage ?? task.stage,
           errorCode: code,
+          version: PIPELINE_VERSION,
         });
         updateTask(task.id, {
           status: "FAILED",
@@ -1145,7 +1351,7 @@ async function runWorker() {
       .prepare(
         `SELECT 1 FROM verification_tasks
          WHERE status = 'PENDING' AND stage = 'FILES_SAVED'
-           AND task_schema_version >= ?
+           AND task_schema_version = ?
            AND extraction_version = ?
          LIMIT 1`,
       )

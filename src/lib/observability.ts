@@ -12,6 +12,10 @@ export type SafeLogEvent = {
   errorCode?: string;
   requestId?: string;
   durationMs?: number;
+  version?: string;
+  evidenceCount?: number;
+  validationStatus?: string;
+  verificationStatus?: string;
 };
 
 export function logSafeEvent(level: "info" | "error", event: SafeLogEvent) {
@@ -28,6 +32,10 @@ export function logSafeEvent(level: "info" | "error", event: SafeLogEvent) {
     errorCode: event.errorCode,
     requestId: event.requestId,
     durationMs: event.durationMs,
+    version: event.version,
+    evidenceCount: event.evidenceCount,
+    validationStatus: event.validationStatus,
+    verificationStatus: event.verificationStatus,
   };
   const output = JSON.stringify(safe);
   if (level === "error") console.error(output);

@@ -2,11 +2,28 @@ import { createHash, randomUUID } from "node:crypto";
 import { db } from "./db";
 
 export type ProcessingStage =
-  | "DOCUMENT_EXTRACTED"
-  | "OCR_COMPLETED"
+  | "DOCUMENT_INGESTED"
+  | "EXTRACTION_COMPLETE"
+  | "OCR_COMPLETE"
   | "STRUCTURED"
   | "EVIDENCE_VALIDATED"
-  | "VERIFIED";
+  | "DERIVED_FACTS"
+  | "VERIFICATION_COMPLETE";
+
+export type PipelineArtifactVersions = {
+  taskSchemaVersion: number;
+  extractionVersion: string;
+  ocrVersion: string;
+  parserVersion: string;
+  evidenceValidatorVersion: string;
+  verificationEngineVersion: string;
+};
+
+export type VersionedStageArtifact<T> = {
+  stage: ProcessingStage;
+  versions: PipelineArtifactVersions;
+  payload: T;
+};
 
 export type DocumentProcessingStage =
   | "DOCUMENT_INGESTED"
@@ -115,6 +132,75 @@ export function writeStageArtifact(
      ON CONFLICT(task_id, stage, cache_key)
      DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
   ).run(randomUUID(), taskId, stage, cacheKey, JSON.stringify(payload), now, now);
+}
+
+export function samePipelineVersions(
+  left: PipelineArtifactVersions,
+  right: PipelineArtifactVersions,
+) {
+  return (
+    left.taskSchemaVersion === right.taskSchemaVersion &&
+    left.extractionVersion === right.extractionVersion &&
+    left.ocrVersion === right.ocrVersion &&
+    left.parserVersion === right.parserVersion &&
+    left.evidenceValidatorVersion === right.evidenceValidatorVersion &&
+    left.verificationEngineVersion === right.verificationEngineVersion
+  );
+}
+
+export function readVersionedStageArtifact<T>(input: {
+  taskId: string;
+  stage: ProcessingStage;
+  cacheKey: string;
+  versions: PipelineArtifactVersions;
+}): T | null {
+  let artifact: VersionedStageArtifact<T> | null;
+  try {
+    artifact = readStageArtifact<VersionedStageArtifact<T>>(
+      input.taskId,
+      input.stage,
+      input.cacheKey,
+    );
+  } catch {
+    return null;
+  }
+  if (
+    !artifact ||
+    artifact.stage !== input.stage ||
+    !artifact.versions ||
+    !samePipelineVersions(artifact.versions, input.versions)
+  ) {
+    return null;
+  }
+  return artifact.payload;
+}
+
+export function writeVersionedStageArtifact<T>(input: {
+  taskId: string;
+  stage: ProcessingStage;
+  cacheKey: string;
+  versions: PipelineArtifactVersions;
+  payload: T;
+}) {
+  writeStageArtifact(input.taskId, input.stage, input.cacheKey, {
+    stage: input.stage,
+    versions: input.versions,
+    payload: input.payload,
+  } satisfies VersionedStageArtifact<T>);
+}
+
+export async function resolveVersionedStageArtifact<T>(input: {
+  taskId: string;
+  stage: ProcessingStage;
+  cacheKey: string;
+  versions: PipelineArtifactVersions;
+  produce: () => Promise<T>;
+}): Promise<{ payload: T; cacheHit: boolean }> {
+  const cached = readVersionedStageArtifact<T>(input);
+  if (cached !== null) return { payload: cached, cacheHit: true };
+  const payload = await input.produce();
+  writeVersionedStageArtifact({ ...input, payload });
+  return { payload, cacheHit: false };
 }
 
 export function readExtractionCache<T>(cacheKey: string): T | null {
