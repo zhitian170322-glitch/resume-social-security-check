@@ -118,7 +118,7 @@ describe("Shenzhen social-security parser", () => {
       cell("2023-02", 2, 1),
       cell("001", 3, 0),
       cell("2023-O4", 3, 1),
-    ]),
+    ], 2),
   ]);
 
   it("maps unit ids and preserves non-continuous paid months for gap detection", () => {

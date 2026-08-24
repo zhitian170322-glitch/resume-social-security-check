@@ -680,24 +680,37 @@ async function structureStage(
       });
   }
   const social: SocialSecurityEvidenceRecord[] = [];
+  const socialByFile = new Map<string, SocialSecurityOCRResult[]>();
   for (const page of payload.socialPages) {
+    socialByFile.set(page.sourceFile, [
+      ...(socialByFile.get(page.sourceFile) ?? []),
+      page.result,
+    ]);
+  }
+  for (const [sourceFile, filePages] of socialByFile) {
+    const merged: SocialSecurityOCRResult = {
+      page: filePages[0]?.page ?? 1,
+      rawText: filePages.map((page) => page.rawText).join("\n"),
+      tables: filePages.flatMap((page) => page.tables),
+      requestId: filePages.map((page) => page.requestId).filter(Boolean).join(",") || null,
+    };
     const parsed: SocialSecurityParseResult = parseSocialSecurityTable({
-      ocr: page.result,
-      sourceFile: page.sourceFile,
+      ocr: merged,
+      sourceFile,
     });
     if (parsed.template === "unknown" || !parsed.records.length) {
       social.push(
         unsupportedSocialRecord(
-          page.sourceFile,
-          page.result.page,
-          page.result.rawText || "无法识别表格结构",
+          sourceFile,
+          merged.page,
+          merged.rawText || "无法识别表格结构",
         ),
       );
       issues.push({
         code: "TEMPLATE_UNKNOWN",
         field: "socialSecurityTemplate",
-        sourceFile: page.sourceFile,
-        sourcePage: page.result.page,
+        sourceFile,
+        sourcePage: merged.page,
         message: parsed.reasons.join("；") || "未知社保模板，必须人工复核",
       });
       continue;
@@ -710,8 +723,8 @@ async function structureStage(
       issues.push({
         code: "TEMPLATE_UNKNOWN",
         field: "socialSecurityTemplate",
-        sourceFile: page.sourceFile,
-        sourcePage: page.result.page,
+        sourceFile,
+        sourcePage: merged.page,
         message: parsed.reasons.join("；") || "社保模板字段不完整，必须人工复核",
       });
     }
