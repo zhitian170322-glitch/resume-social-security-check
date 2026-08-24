@@ -16,8 +16,8 @@ services:
       - app-data:/data
     expose:
       - "3000"
-    ports:
-      - "127.0.0.1:${APP_PORT:-3100}:3000"
+    networks:
+      - orangeito_default
     mem_limit: 1400m
     cpus: 1.75
     healthcheck:
@@ -28,3 +28,8 @@ services:
 
 volumes:
   app-data:
+
+networks:
+  orangeito_default:
+    external: true
+    name: orangeito_default
