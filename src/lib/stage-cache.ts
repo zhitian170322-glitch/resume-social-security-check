@@ -8,8 +8,83 @@ export type ProcessingStage =
   | "EVIDENCE_VALIDATED"
   | "VERIFIED";
 
+export type DocumentProcessingStage =
+  | "DOCUMENT_INGESTED"
+  | "PDF_EXTRACTED"
+  | "QUALITY_EVALUATED";
+
+export type DocumentStageCacheIdentity = {
+  taskId: string;
+  documentId: string;
+  contentHash: string;
+  stage: DocumentProcessingStage;
+  version: string;
+};
+
 export function contentHash(data: Buffer | string) {
   return createHash("sha256").update(data).digest("hex");
+}
+
+export function documentStageCacheKey(identity: DocumentStageCacheIdentity) {
+  return contentHash(
+    [
+      identity.taskId,
+      identity.documentId,
+      identity.contentHash,
+      identity.stage,
+      identity.version,
+    ].join("\u001f"),
+  );
+}
+
+export function readDocumentStageCache<T>(
+  identity: DocumentStageCacheIdentity,
+): T | null {
+  const cacheKey = documentStageCacheKey(identity);
+  const row = db
+    .prepare(
+      `SELECT payload_json FROM stage_cache
+       WHERE task_id = ? AND document_id = ? AND content_hash = ?
+         AND stage = ? AND version = ? AND cache_key = ?`,
+    )
+    .get(
+      identity.taskId,
+      identity.documentId,
+      identity.contentHash,
+      identity.stage,
+      identity.version,
+      cacheKey,
+    ) as { payload_json: string } | undefined;
+  return row ? (JSON.parse(row.payload_json) as T) : null;
+}
+
+export function writeDocumentStageCache(
+  identity: DocumentStageCacheIdentity,
+  payload: unknown,
+) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO stage_cache
+      (id, task_id, document_id, content_hash, stage, version, cache_key,
+       payload_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(task_id, document_id, content_hash, stage, version)
+     DO UPDATE SET
+       cache_key = excluded.cache_key,
+       payload_json = excluded.payload_json,
+       updated_at = excluded.updated_at`,
+  ).run(
+    randomUUID(),
+    identity.taskId,
+    identity.documentId,
+    identity.contentHash,
+    identity.stage,
+    identity.version,
+    documentStageCacheKey(identity),
+    JSON.stringify(payload),
+    now,
+    now,
+  );
 }
 
 export function readStageArtifact<T>(

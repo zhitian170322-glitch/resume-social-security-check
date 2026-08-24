@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,13 @@ afterEach(async () => {
 });
 
 describe("forward-only database migration", () => {
+  it("contains no destructive legacy-table operations", async () => {
+    const migration = await readFile("scripts/init-db.mjs", "utf8");
+    expect(migration).not.toMatch(/\bDROP\b/i);
+    expect(migration).not.toMatch(/\bRENAME\s+(?:COLUMN|TO)\b/i);
+    expect(migration).not.toMatch(/\bUPDATE\s+verification_tasks\b/i);
+  });
+
   it("preserves a V1 task while adding evidence cache tables", async () => {
     directory = await mkdtemp(join(tmpdir(), "verification-migration-"));
     const path = join(directory, "app.db");
@@ -29,17 +36,28 @@ describe("forward-only database migration", () => {
     `);
     db.prepare(
       `INSERT INTO verification_tasks
-       (id,status,stage,candidate_name,created_at,updated_at)
-       VALUES ('old-task','COMPLETED','COMPLETED','旧候选人','2024-01-01','2024-01-01')`,
-    ).run();
+       (id,status,stage,candidate_name,result_json,created_at,updated_at)
+       VALUES ('old-task','COMPLETED','COMPLETED','旧候选人',?,'2024-01-01','2024-01-01')`,
+    ).run('{"candidateName":"旧候选人","legacy":true}');
     db.close();
     await exec("node", [resolve("scripts/init-db.mjs")], {
       env: { ...process.env, DATABASE_URL: `file:${path}` },
     });
     const migrated = new Database(path);
     expect(
-      migrated.prepare("SELECT candidate_name FROM verification_tasks WHERE id='old-task'").get(),
-    ).toEqual({ candidate_name: "旧候选人" });
+      migrated
+        .prepare(
+          `SELECT candidate_name, result_json, task_schema_version,
+                  extraction_version
+           FROM verification_tasks WHERE id='old-task'`,
+        )
+        .get(),
+    ).toEqual({
+      candidate_name: "旧候选人",
+      result_json: '{"candidateName":"旧候选人","legacy":true}',
+      task_schema_version: 1,
+      extraction_version: null,
+    });
     expect(
       migrated
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_stage_artifacts'")
@@ -48,6 +66,26 @@ describe("forward-only database migration", () => {
     expect(
       migrated.prepare("SELECT schema_version FROM verification_tasks WHERE id='old-task'").get(),
     ).toEqual({ schema_version: 1 });
+    for (const table of [
+      "documents",
+      "document_pages",
+      "raw_extractions",
+      "extraction_warnings",
+      "stage_cache",
+    ]) {
+      expect(
+        migrated
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+          )
+          .get(table),
+      ).toEqual({ name: table });
+    }
+    expect(
+      migrated
+        .prepare("SELECT version FROM schema_migrations WHERE version = 3")
+        .get(),
+    ).toEqual({ version: 3 });
     migrated.close();
   });
 });
