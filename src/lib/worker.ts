@@ -21,8 +21,17 @@ import {
   type OCRProvider,
   type OCRResult,
 } from "./ocr";
-import { AliyunSocialSecurityOCRProvider } from "./social-security-provider";
-import type { SocialSecurityOCRResult } from "./social-security-table";
+import {
+  AliyunSocialSecurityOCRProvider,
+  CachedSocialSecurityOCRProvider,
+  SocialSecurityOCRError,
+} from "./social-security-provider";
+import type {
+  SocialSecurityOCRProvider,
+  SocialSecurityOCRResult,
+} from "./social-security-table";
+import { SocialSecurityPageClassifier } from "./social-security-page-classifier";
+import { persistSocialSecurityOCRResult } from "./social-security-evidence";
 import {
   parseSocialSecurityTable,
   type ParsedSocialSecurityRecord,
@@ -85,7 +94,7 @@ type StructuredPayload = {
 };
 
 const workerGlobal = globalThis as typeof globalThis & { verificationWorkerRunning?: boolean };
-const PIPELINE_VERSION = "evidence-v2.1";
+const PIPELINE_VERSION = "evidence-v2.2-phase6";
 
 export function isEvidencePipelineTask(
   task: Pick<TaskRow, "task_schema_version" | "extraction_version">,
@@ -208,6 +217,7 @@ function generalOCR(task: TaskRow): OCRProvider {
 
 async function tableOCR(
   task: TaskRow,
+  documentId: string,
   input: Buffer,
   page: number,
 ): Promise<SocialSecurityOCRResult> {
@@ -222,62 +232,85 @@ async function tableOCR(
       prepared = await sharp(prepared).jpeg({ quality: 90 }).toBuffer();
     }
   }
-  const key = contentHash(
-    `${PIPELINE_VERSION}:aliyun:RecognizeTableOcr:${contentHash(prepared)}`,
-  );
-  const cached = readExtractionCache<SocialSecurityOCRResult>(key);
-  if (cached) {
+  const provider = socialSecurityOCRProvider(task, documentId, page);
+  const result = await provider.recognizeTable(prepared, "image/png", page);
+  persistSocialSecurityOCRResult({ taskId: task.id, documentId, result });
+  return result;
+}
+
+function socialSecurityOCRProvider(
+  task: TaskRow,
+  documentId: string,
+  page: number,
+): SocialSecurityOCRProvider {
+  const provider = new AliyunSocialSecurityOCRProvider((metric) => {
+    const apiType =
+      metric.apiType === "TABLE" ? "RecognizeTableOcr" : "RecognizeGeneral";
+    if (!metric.errorCode) {
+      recordOCRCall(task.id, Boolean(task.paid_override), apiType);
+    }
     recordApiCall({
       taskId: task.id,
+      documentId,
       provider: "aliyun",
-      apiType: "RecognizeTableOcr",
-      sourcePage: page,
-      durationMs: 0,
-      cacheHit: true,
-      estimatedCost: 0,
-    });
-    return { ...cached, page };
-  }
-  let metric = { durationMs: 0 } as {
-    durationMs: number;
-    httpStatus?: number;
-    errorCode?: string;
-    requestId?: string;
-  };
-  const provider = new AliyunSocialSecurityOCRProvider((value) => {
-    metric = value;
-  });
-  try {
-    const result = await provider.recognize(prepared, "image/png", page);
-    recordOCRCall(task.id, Boolean(task.paid_override), "RecognizeTableOcr");
-    recordApiCall({
-      taskId: task.id,
-      provider: "aliyun",
-      apiType: "RecognizeTableOcr",
+      apiType,
       sourcePage: page,
       httpStatus: metric.httpStatus,
-      requestId: result.requestId ?? metric.requestId,
-      durationMs: metric.durationMs,
-      cacheHit: false,
-      estimatedCost: config.OCR_TABLE_ESTIMATED_COST,
-    });
-    writeExtractionCache(key, "aliyun", "RecognizeTableOcr", result);
-    return result;
-  } catch (error) {
-    recordApiCall({
-      taskId: task.id,
-      provider: "aliyun",
-      apiType: "RecognizeTableOcr",
-      sourcePage: page,
-      httpStatus: metric.httpStatus,
-      errorCode: metric.errorCode ?? "TABLE_OCR_FAILED",
+      errorCode: metric.errorCode,
       requestId: metric.requestId,
       durationMs: metric.durationMs,
       cacheHit: false,
-      estimatedCost: 0,
+      estimatedCost: metric.errorCode
+        ? 0
+        : metric.apiType === "TABLE"
+          ? config.OCR_TABLE_ESTIMATED_COST
+          : config.OCR_GENERAL_ESTIMATED_COST,
     });
-    throw error;
-  }
+    logSafeEvent(metric.errorCode ? "error" : "info", {
+      taskId: task.id,
+      documentId,
+      stage: "OCR_COMPLETED",
+      provider: "aliyun",
+      apiType,
+      page,
+      httpStatus: metric.httpStatus,
+      errorCode: metric.errorCode,
+      requestId: metric.requestId,
+      durationMs: metric.durationMs,
+    });
+  });
+  return new CachedSocialSecurityOCRProvider(
+    provider,
+    undefined,
+    (identity) => {
+      recordApiCall({
+        taskId: task.id,
+        documentId,
+        provider: identity.provider,
+        apiType:
+          identity.apiType === "TABLE"
+            ? "RecognizeTableOcr"
+            : "RecognizeGeneral",
+        sourcePage: identity.pageNumber,
+        durationMs: 0,
+        cacheHit: true,
+        estimatedCost: 0,
+      });
+    },
+  );
+}
+
+async function generalSocialSecurityOCR(
+  task: TaskRow,
+  documentId: string,
+  input: Buffer,
+  mimeType: string,
+  page: number,
+) {
+  const provider = socialSecurityOCRProvider(task, documentId, page);
+  const result = await provider.recognizeGeneral(input, mimeType, page);
+  persistSocialSecurityOCRResult({ taskId: task.id, documentId, result });
+  return result;
 }
 
 async function estimateOCRCalls(
@@ -285,6 +318,7 @@ async function estimateOCRCalls(
   pdfAnalyses: ReadonlyMap<string, DocumentAnalysis>,
 ) {
   let count = 0;
+  const classifier = new SocialSecurityPageClassifier();
   for (const file of files) {
     const data = await fileStorage.read(file.storage_key);
     const fileCacheKey = contentHash(
@@ -292,15 +326,32 @@ async function estimateOCRCalls(
     );
     if (readExtractionCache(fileCacheKey)) continue;
     if (file.mime_type !== "application/pdf") {
-      count += 1;
+      count += file.kind === "SOCIAL_SECURITY" ? 2 : 1;
       continue;
     }
     const analysis = pdfAnalyses.get(file.id);
     if (!analysis) throw new Error("PDF_PARSE_FAILED: 缺少已缓存的 PDF 提取结果");
-    count +=
-      file.kind === "SOCIAL_SECURITY"
-        ? analysis.pages.length
-        : analysis.estimatedOCRCalls;
+    if (file.kind === "SOCIAL_SECURITY") {
+      count += analysis.pages.reduce((total, page) => {
+        const classification = classifier.classify({
+          mimeType: file.mime_type,
+          text: page.localText,
+          source: "PDF_TEXT",
+        });
+        return (
+          total +
+          (classification.pageType === "PLAIN_TEXT"
+            ? 0
+            : classification.pageType === "TABLE"
+              ? 1
+              : classification.pageType === "SCANNED_UNKNOWN"
+                ? 2
+                : 0)
+        );
+      }, 0);
+    } else {
+      count += analysis.estimatedOCRCalls;
+    }
   }
   return count;
 }
@@ -329,6 +380,7 @@ async function extractOCRStage(
 ): Promise<OCRStagePayload> {
   const pages: DocumentPage[] = [];
   const socialPages: OCRStagePayload["socialPages"] = [];
+  const socialPageClassifier = new SocialSecurityPageClassifier();
   const resumeData = await fileStorage.read(resumeFile.storage_key);
   const resumeFileCacheKey = contentHash(
     `${PIPELINE_VERSION}:file-ocr:${resumeFile.kind}:${contentHash(resumeData)}`,
@@ -396,8 +448,74 @@ async function extractOCRStage(
           throw new Error("PDF_PARSE_FAILED: 缺少已缓存的 PDF 提取结果");
         }
         for (const page of analysis.pages) {
-          const image = await renderPdfPage(path, page.page);
-          const result = await tableOCR(task, image, page.page);
+          const classification = socialPageClassifier.classify({
+            mimeType: file.mime_type,
+            text: page.localText,
+            source: "PDF_TEXT",
+          });
+          if (classification.pageType === "UNSUPPORTED") {
+            const documentPage: DocumentPage = {
+              page: page.page,
+              sourceFile: file.original_name,
+              pdfText: page.localText,
+              ocrText: null,
+              selectedText: null,
+              extractionMethod: "manual_required",
+              qualityScore: page.qualityScore,
+              ocrConfidence: null,
+              warnings: ["UNSUPPORTED", "MANUAL_REVIEW_REQUIRED"],
+            };
+            pages.push(documentPage);
+            fileDocumentPages.push(documentPage);
+            continue;
+          }
+          let result: SocialSecurityOCRResult;
+          if (classification.pageType === "PLAIN_TEXT" && page.localText) {
+            result = {
+              page: page.page,
+              rawText: page.localText,
+              tables: [],
+              requestId: null,
+              provider: "local-pdftotext",
+              providerVersion: "poppler",
+              apiType: "GENERAL",
+              ocrVersion: DOCUMENT_EXTRACTION_VERSION,
+              contentHash: contentHash(page.localText),
+              rawProviderResponseRef: null,
+            };
+          } else {
+            const image = await renderPdfPage(path, page.page);
+            if (classification.pageType === "TABLE") {
+              result = await tableOCR(
+                task,
+                file.document_id,
+                image,
+                page.page,
+              );
+            } else {
+              const general = await generalSocialSecurityOCR(
+                task,
+                file.document_id,
+                image,
+                "image/png",
+                page.page,
+              );
+              const preview = socialPageClassifier.classify({
+                mimeType: file.mime_type,
+                text: general.rawText,
+                source: "GENERAL_OCR_PREVIEW",
+              });
+              result =
+                preview.pageType === "TABLE"
+                  ? await tableOCR(
+                      task,
+                      file.document_id,
+                      image,
+                      page.page,
+                    )
+                  : general;
+            }
+          }
           const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
           const confidences = result.tables
             .map((table) => table.confidence)
@@ -412,13 +530,24 @@ async function extractOCRStage(
             ocrText: selectedText,
             selectedText,
             extractionMethod:
-              confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
-                ? "ocr"
-                : "manual_required",
-            qualityScore: confidence === null ? 0 : Math.round(confidence * 100),
+              result.provider === "local-pdftotext"
+                ? "pdf_text"
+                : confidence !== null &&
+                    confidence >= config.OCR_MIN_CONFIDENCE
+                  ? "ocr"
+                  : "manual_required",
+            qualityScore:
+              result.provider === "local-pdftotext"
+                ? page.qualityScore
+                : confidence === null
+                  ? 0
+                  : Math.round(confidence * 100),
             ocrConfidence: confidence,
             warnings:
-              confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
+              result.provider === "local-pdftotext"
+                ? classification.reasons
+                : confidence !== null &&
+                    confidence >= config.OCR_MIN_CONFIDENCE
                 ? []
                 : ["OCR_CONFIDENCE_LOW"],
           };
@@ -429,7 +558,22 @@ async function extractOCRStage(
         }
       });
     } else {
-      const result = await tableOCR(task, data, 1);
+      const general = await generalSocialSecurityOCR(
+        task,
+        file.document_id,
+        data,
+        file.mime_type,
+        1,
+      );
+      const preview = socialPageClassifier.classify({
+        mimeType: file.mime_type,
+        text: general.rawText,
+        source: "GENERAL_OCR_PREVIEW",
+      });
+      const result =
+        preview.pageType === "TABLE"
+          ? await tableOCR(task, file.document_id, data, 1)
+          : general;
       const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
       const confidences = result.tables
         .map((table) => table.confidence)
@@ -522,7 +666,7 @@ function convertParsedRecord(
   const companyStatus = statusFor(record.fieldConfidence.company);
   const startStatus = statusFor(record.fieldConfidence.startMonth);
   const endStatus = statusFor(record.fieldConfidence.endMonth);
-  const paidStatus = record.paidMonths.length
+  const paidStatus = record.paidMonths?.length
     ? statusFor(record.fieldConfidence.paidMonths)
     : ("unsupported" as const);
   const companyUncertain = /[OIl]/.test(record.companyRaw);
@@ -548,7 +692,7 @@ function convertParsedRecord(
       record.fieldConfidence.endMonth,
     ),
     paidMonths: monthsEvidence(
-      record.paidMonths.length ? record.paidMonths : null,
+      record.paidMonths?.length ? record.paidMonths : null,
       record,
       paidStatus,
       record.fieldConfidence.paidMonths,
@@ -723,12 +867,26 @@ async function structureStage(
       rawText: filePages.map((page) => page.rawText).join("\n"),
       tables: filePages.flatMap((page) => page.tables),
       requestId: filePages.map((page) => page.requestId).filter(Boolean).join(",") || null,
+      provider: filePages[0]?.provider ?? "unknown",
+      providerVersion: filePages[0]?.providerVersion ?? "unknown",
+      apiType: filePages.some((page) => page.apiType === "TABLE")
+        ? "TABLE"
+        : "GENERAL",
+      ocrVersion: filePages[0]?.ocrVersion ?? "unknown",
+      contentHash: contentHash(
+        filePages.map((page) => page.contentHash).join("|"),
+      ),
+      rawProviderResponseRef:
+        filePages
+          .map((page) => page.rawProviderResponseRef)
+          .filter(Boolean)
+          .join(",") || null,
     };
     const parsed: SocialSecurityParseResult = parseSocialSecurityTable({
       ocr: merged,
       sourceFile,
     });
-    if (parsed.template === "unknown" || !parsed.records.length) {
+    if (parsed.template === "UNKNOWN" || !parsed.records.length) {
       social.push(
         unsupportedSocialRecord(
           sourceFile,
@@ -746,7 +904,10 @@ async function structureStage(
       continue;
     }
     const converted = parsed.records.map((record) =>
-      convertParsedRecord(record, parsed.template as "shenzhen" | "guangdong"),
+      convertParsedRecord(
+        record,
+        parsed.template === "SHENZHEN" ? "shenzhen" : "guangdong",
+      ),
     );
     if (!parsed.autoVerifiable) {
       converted.forEach((record) => record.warnings.push("TEMPLATE_INCOMPLETE"));
@@ -924,6 +1085,7 @@ async function processTask(task: TaskRow) {
 
 function classifyError(error: unknown) {
   const text = error instanceof Error ? error.message : "";
+  if (error instanceof SocialSecurityOCRError) return error.code;
   if (text.includes("PDF_PARSE_FAILED")) return "PDF_PARSE_FAILED";
   if (
     text.includes("AI_PARSE_FAILED") ||

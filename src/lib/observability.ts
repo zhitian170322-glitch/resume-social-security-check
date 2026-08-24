@@ -3,8 +3,10 @@ import { db } from "./db";
 
 export type SafeLogEvent = {
   taskId: string;
+  documentId?: string;
   stage: string;
   provider?: string;
+  apiType?: string;
   page?: number;
   httpStatus?: number;
   errorCode?: string;
@@ -17,8 +19,10 @@ export function logSafeEvent(level: "info" | "error", event: SafeLogEvent) {
     level,
     at: new Date().toISOString(),
     taskId: event.taskId,
+    documentId: event.documentId,
     stage: event.stage,
     provider: event.provider,
+    apiType: event.apiType,
     page: event.page,
     httpStatus: event.httpStatus,
     errorCode: event.errorCode,
@@ -32,6 +36,7 @@ export function logSafeEvent(level: "info" | "error", event: SafeLogEvent) {
 
 export function recordApiCall(input: {
   taskId: string;
+  documentId?: string;
   provider: string;
   apiType: string;
   sourcePage?: number;
@@ -44,12 +49,13 @@ export function recordApiCall(input: {
 }) {
   db.prepare(
     `INSERT INTO api_calls
-      (id, task_id, provider, api_type, source_page, http_status, error_code,
+      (id, task_id, document_id, provider, api_type, source_page, http_status, error_code,
        request_id, duration_ms, cache_hit, estimated_cost, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     randomUUID(),
     input.taskId,
+    input.documentId ?? null,
     input.provider,
     input.apiType,
     input.sourcePage ?? null,

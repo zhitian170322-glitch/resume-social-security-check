@@ -3,12 +3,21 @@
  * coupling the parsers to a particular OCR SDK.
  */
 export interface SocialSecurityOCRCell {
+  id: string;
+  rawText: string;
   text: string;
   row: number;
   column: number;
   rowSpan: number;
   columnSpan: number;
   confidence: number | null;
+  bbox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  polygon: Array<{ x: number; y: number }> | null;
 }
 
 export interface SocialSecurityOCRTable {
@@ -16,6 +25,11 @@ export interface SocialSecurityOCRTable {
   page: number;
   cells: SocialSecurityOCRCell[];
   confidence: number | null;
+  provider: string;
+  providerVersion: string;
+  ocrVersion: string;
+  contentHash: string;
+  rawProviderResponseRef: string | null;
 }
 
 export interface SocialSecurityOCRResult {
@@ -23,10 +37,24 @@ export interface SocialSecurityOCRResult {
   rawText: string;
   tables: SocialSecurityOCRTable[];
   requestId: string | null;
+  provider: string;
+  providerVersion: string;
+  apiType: "GENERAL" | "TABLE";
+  ocrVersion: string;
+  contentHash: string;
+  rawProviderResponseRef: string | null;
 }
 
 export interface SocialSecurityOCRProvider {
-  recognize(
+  readonly provider: string;
+  readonly providerVersion: string;
+  readonly ocrVersion: string;
+  recognizeGeneral(
+    input: Buffer,
+    mimeType: string,
+    page?: number,
+  ): Promise<SocialSecurityOCRResult>;
+  recognizeTable(
     input: Buffer,
     mimeType: string,
     page?: number,
@@ -67,6 +95,47 @@ function confidence(value: unknown): number | null {
   const number = finiteNumber(value);
   if (number === null || number < 0) return null;
   return Math.min(1, number > 1 ? number / 100 : number);
+}
+
+function point(value: unknown): { x: number; y: number } | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const x = finiteNumber(first(record, "x", "X"));
+  const y = finiteNumber(first(record, "y", "Y"));
+  return x === null || y === null ? null : { x, y };
+}
+
+function polygon(value: unknown): Array<{ x: number; y: number }> | null {
+  if (!Array.isArray(value)) return null;
+  const points = value.map(point).filter((entry): entry is { x: number; y: number } => entry !== null);
+  return points.length >= 2 ? points : null;
+}
+
+function boundingBox(
+  value: unknown,
+  points: Array<{ x: number; y: number }> | null,
+): SocialSecurityOCRCell["bbox"] {
+  const record = asRecord(value);
+  if (record) {
+    const x = finiteNumber(first(record, "x", "left"));
+    const y = finiteNumber(first(record, "y", "top"));
+    const width = finiteNumber(first(record, "width", "w"));
+    const height = finiteNumber(first(record, "height", "h"));
+    if (x !== null && y !== null && width !== null && height !== null) {
+      return { x, y, width, height };
+    }
+  }
+  if (!points?.length) return null;
+  const xs = points.map((entry) => entry.x);
+  const ys = points.map((entry) => entry.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return {
+    x,
+    y,
+    width: Math.max(...xs) - x,
+    height: Math.max(...ys) - y,
+  };
 }
 
 function parseData(value: unknown): UnknownRecord {
@@ -122,8 +191,12 @@ function decodeCell(
   const derivedScores =
     cellId === undefined ? [] : (scores.get(`${tableId}:${String(cellId)}`) ?? []);
 
+  const rawText = String(first(cell, "word", "text", "content") ?? "");
+  const cellPolygon = polygon(first(cell, "pos", "polygon", "points"));
   return {
-    text: String(first(cell, "word", "text", "content") ?? ""),
+    id: cellId === undefined ? `${tableId}:${row}:${column}` : String(cellId),
+    rawText,
+    text: rawText,
     row,
     column,
     rowSpan: Math.max(
@@ -135,6 +208,8 @@ function decodeCell(
       nonNegativeInteger(first(cell, "columnSpan", "colSpan"), endColumn - column + 1),
     ),
     confidence: directScore ?? mean(derivedScores),
+    bbox: boundingBox(first(cell, "bbox", "box"), cellPolygon),
+    polygon: cellPolygon,
   };
 }
 
@@ -172,6 +247,11 @@ function rawText(data: UnknownRecord, tables: SocialSecurityOCRTable[]): string 
 export function decodeAliyunRecognizeTableOcrResponse(
   response: unknown,
   page = 1,
+  metadata: {
+    contentHash?: string;
+    providerVersion?: string;
+    ocrVersion?: string;
+  } = {},
 ): SocialSecurityOCRResult {
   const envelope = asRecord(response);
   const body = asRecord(first(envelope, "body", "Body")) ?? envelope;
@@ -198,6 +278,11 @@ export function decodeAliyunRecognizeTableOcrResponse(
         cells,
         confidence: confidence(first(table, "prob", "confidence")) ??
           mean(cells.map((cell) => cell.confidence)),
+        provider: "aliyun",
+        providerVersion: metadata.providerVersion ?? "ocr-api20210707",
+        ocrVersion: metadata.ocrVersion ?? "aliyun-table-v1",
+        contentHash: metadata.contentHash ?? "",
+        rawProviderResponseRef: null,
       });
     });
   }
@@ -206,6 +291,10 @@ export function decodeAliyunRecognizeTableOcrResponse(
     first(body, "requestId", "RequestId") ??
     first(envelope, "requestId", "RequestId") ??
     first(data, "requestId", "RequestId");
+  for (const table of tables) {
+    table.rawProviderResponseRef =
+      requestId === undefined || requestId === null ? null : String(requestId);
+  }
 
   return {
     page,
@@ -214,5 +303,12 @@ export function decodeAliyunRecognizeTableOcrResponse(
     requestId: requestId === undefined || requestId === null
       ? null
       : String(requestId),
+    provider: "aliyun",
+    providerVersion: metadata.providerVersion ?? "ocr-api20210707",
+    apiType: "TABLE",
+    ocrVersion: metadata.ocrVersion ?? "aliyun-table-v1",
+    contentHash: metadata.contentHash ?? "",
+    rawProviderResponseRef:
+      requestId === undefined || requestId === null ? null : String(requestId),
   };
 }

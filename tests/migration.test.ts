@@ -75,6 +75,9 @@ describe("forward-only database migration", () => {
       "raw_extractions",
       "extraction_warnings",
       "stage_cache",
+      "ocr_page_cache",
+      "social_security_ocr_results",
+      "social_security_cell_evidence",
     ]) {
       expect(
         migrated
@@ -86,9 +89,9 @@ describe("forward-only database migration", () => {
     }
     expect(
       migrated
-        .prepare("SELECT version FROM schema_migrations WHERE version = 3")
+        .prepare("SELECT version FROM schema_migrations WHERE version = 4")
         .get(),
-    ).toEqual({ version: 3 });
+    ).toEqual({ version: 4 });
     migrated.close();
   });
 });

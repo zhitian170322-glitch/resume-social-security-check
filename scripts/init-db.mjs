@@ -112,6 +112,42 @@ db.exec(`
     updated_at TEXT NOT NULL,
     UNIQUE(task_id, document_id, content_hash, stage, version)
   );
+  CREATE TABLE IF NOT EXISTS ocr_page_cache (
+    cache_key TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+    page_number INTEGER NOT NULL CHECK(page_number > 0), provider TEXT NOT NULL,
+    api_type TEXT NOT NULL CHECK(api_type IN ('GENERAL','TABLE')),
+    ocr_version TEXT NOT NULL, payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL, last_used_at TEXT NOT NULL,
+    UNIQUE(content_hash, page_number, provider, api_type, ocr_version)
+  );
+  CREATE TABLE IF NOT EXISTS social_security_ocr_results (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES verification_tasks(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page_number INTEGER NOT NULL CHECK(page_number > 0),
+    provider TEXT NOT NULL, provider_version TEXT NOT NULL,
+    api_type TEXT NOT NULL CHECK(api_type IN ('GENERAL','TABLE')),
+    ocr_version TEXT NOT NULL, content_hash TEXT NOT NULL,
+    raw_provider_response_ref TEXT, result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(document_id, page_number, provider, api_type, ocr_version, content_hash)
+  );
+  CREATE TABLE IF NOT EXISTS social_security_cell_evidence (
+    id TEXT PRIMARY KEY,
+    ocr_result_id TEXT NOT NULL REFERENCES social_security_ocr_results(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page_number INTEGER NOT NULL CHECK(page_number > 0),
+    table_index INTEGER NOT NULL CHECK(table_index >= 0),
+    row_index INTEGER NOT NULL CHECK(row_index >= 0),
+    column_index INTEGER NOT NULL CHECK(column_index >= 0),
+    source_cell_id TEXT NOT NULL, raw_value TEXT NOT NULL,
+    bbox_json TEXT, polygon_json TEXT, confidence REAL,
+    extraction_method TEXT NOT NULL CHECK(extraction_method = 'OCR_TABLE'),
+    provider TEXT NOT NULL, provider_version TEXT NOT NULL,
+    content_hash TEXT NOT NULL, ocr_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(ocr_result_id, table_index, row_index, column_index, source_cell_id)
+  );
   CREATE INDEX IF NOT EXISTS idx_documents_task ON documents(task_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_documents_content_version ON documents(content_hash, extraction_version);
   CREATE INDEX IF NOT EXISTS idx_document_pages_document ON document_pages(document_id, page_number);
@@ -119,6 +155,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_extraction_warnings_page ON extraction_warnings(document_page_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_stage_cache_lookup
     ON stage_cache(task_id, document_id, content_hash, stage, version);
+  CREATE INDEX IF NOT EXISTS idx_ocr_page_cache_lookup
+    ON ocr_page_cache(content_hash, page_number, provider, api_type, ocr_version);
+  CREATE INDEX IF NOT EXISTS idx_social_cells_document_page
+    ON social_security_cell_evidence(document_id, page_number, table_index, row_index);
 `);
 const columns = new Set(db.prepare("PRAGMA table_info(verification_tasks)").all().map((row) => row.name));
 for (const definition of [
@@ -132,7 +172,11 @@ for (const definition of [
   const name = definition.split(/\s+/, 1)[0];
   if (!columns.has(name)) db.exec(`ALTER TABLE verification_tasks ADD COLUMN ${definition}`);
 }
-db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)")
+const apiCallColumns = new Set(db.prepare("PRAGMA table_info(api_calls)").all().map((row) => row.name));
+if (!apiCallColumns.has("document_id")) {
+  db.exec("ALTER TABLE api_calls ADD COLUMN document_id TEXT");
+}
+db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?)")
   .run(new Date().toISOString());
 db.exec("COMMIT");
 } catch (error) {

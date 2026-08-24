@@ -29,6 +29,9 @@ describe("Document Extraction Layer", () => {
     } = await import("./document-extraction");
     const { contentHash } = await import("./stage-cache");
     const { isEvidencePipelineTask } = await import("./worker");
+    const { persistSocialSecurityOCRResult } = await import(
+      "./social-security-evidence"
+    );
 
     const taskId = "new-task";
     const fileId = "file-1";
@@ -151,6 +154,67 @@ describe("Document Extraction Layer", () => {
         extraction_version: DOCUMENT_EXTRACTION_VERSION,
       }),
     ).toBe(true);
+
+    persistSocialSecurityOCRResult({
+      taskId,
+      documentId,
+      result: {
+        page: 1,
+        rawText: "30078648",
+        requestId: "request-1",
+        provider: "aliyun",
+        providerVersion: "ocr-api20210707",
+        apiType: "TABLE",
+        ocrVersion: "social-security-ocr-v1",
+        contentHash: "ocr-page-hash",
+        rawProviderResponseRef: "request-1",
+        tables: [
+          {
+            id: "table-1",
+            page: 1,
+            confidence: 0.98,
+            provider: "aliyun",
+            providerVersion: "ocr-api20210707",
+            ocrVersion: "social-security-ocr-v1",
+            contentHash: "ocr-page-hash",
+            rawProviderResponseRef: "request-1",
+            cells: [
+              {
+                id: "cell-1",
+                rawText: "30078648",
+                text: "30078648",
+                row: 1,
+                column: 0,
+                rowSpan: 1,
+                columnSpan: 1,
+                confidence: 0.97,
+                bbox: { x: 1, y: 2, width: 3, height: 4 },
+                polygon: null,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(
+      db
+        .prepare(
+          `SELECT page_number, table_index, row_index, column_index, raw_value,
+                  bbox_json, confidence, provider, ocr_version
+           FROM social_security_cell_evidence WHERE document_id = ?`,
+        )
+        .get(documentId),
+    ).toEqual({
+      page_number: 1,
+      table_index: 0,
+      row_index: 1,
+      column_index: 0,
+      raw_value: "30078648",
+      bbox_json: '{"x":1,"y":2,"width":3,"height":4}',
+      confidence: 0.97,
+      provider: "aliyun",
+      ocr_version: "social-security-ocr-v1",
+    });
     db.close();
   });
 });
