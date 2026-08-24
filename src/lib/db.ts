@@ -242,9 +242,15 @@ export function initializeDatabase() {
     addColumn("verification_tasks", "ocr_pages INTEGER NOT NULL DEFAULT 0");
     addColumn("verification_tasks", "deepseek_calls INTEGER NOT NULL DEFAULT 0");
     addColumn("verification_tasks", "estimated_cost REAL NOT NULL DEFAULT 0");
+    addColumn(
+      "verification_tasks",
+      "review_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(review_status IN ('PENDING','CONFIRMED','REJECTED'))",
+    );
+    addColumn("verification_tasks", "review_note TEXT");
+    addColumn("verification_tasks", "reviewed_at TEXT");
     addColumn("api_calls", "document_id TEXT");
     db.prepare(
-      "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?)",
+      "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, ?)",
     ).run(new Date().toISOString());
   })();
 }
@@ -272,4 +278,7 @@ export type TaskRow = {
   ocr_pages: number;
   deepseek_calls: number;
   estimated_cost: number;
+  review_status: "PENDING" | "CONFIRMED" | "REJECTED";
+  review_note: string | null;
+  reviewed_at: string | null;
 };

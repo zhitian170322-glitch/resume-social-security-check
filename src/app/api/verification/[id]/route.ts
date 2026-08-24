@@ -3,8 +3,85 @@ import { db, type TaskRow } from "@/lib/db";
 import { fileStorage } from "@/lib/file-storage";
 import { kickWorker } from "@/lib/worker";
 import { EVIDENCE_TASK_SCHEMA_VERSION } from "@/lib/document-extraction";
+import {
+  buildResultViewModel,
+  readStoredArtifactPayload,
+  type HumanReview,
+  type TableCellDisplay,
+} from "@/lib/result-view-model";
+import type { Phase8VerificationResult } from "@/lib/verification-engine-phase8";
+import type {
+  DerivedFactsPayload,
+  EvidenceValidationStagePayload,
+} from "@/lib/worker-pipeline-integration";
+import { saveHumanReview } from "@/lib/human-review";
 
 export const runtime = "nodejs";
+
+function parseJson(value: string | null) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function latestArtifactPayload<T>(taskId: string, stage: string) {
+  const row = db
+    .prepare(
+      `SELECT payload_json FROM task_stage_artifacts
+       WHERE task_id = ? AND stage = ?
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(taskId, stage) as { payload_json: string } | undefined;
+  return readStoredArtifactPayload<T>(row?.payload_json ?? null);
+}
+
+function tableCellEvidence(taskId: string): TableCellDisplay[] {
+  const rows = db
+    .prepare(
+      `SELECT cells.id, documents.original_name AS source_file,
+              cells.page_number, cells.table_index, cells.row_index,
+              cells.column_index, cells.raw_value, cells.bbox_json,
+              cells.confidence
+       FROM social_security_cell_evidence cells
+       JOIN documents ON documents.id = cells.document_id
+       WHERE documents.task_id = ?
+       ORDER BY cells.page_number, cells.table_index,
+                cells.row_index, cells.column_index`,
+    )
+    .all(taskId) as Array<{
+    id: string;
+    source_file: string;
+    page_number: number;
+    table_index: number;
+    row_index: number;
+    column_index: number;
+    raw_value: string;
+    bbox_json: string | null;
+    confidence: number | null;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    sourceFile: row.source_file,
+    page: row.page_number,
+    tableIndex: row.table_index,
+    rowIndex: row.row_index,
+    columnIndex: row.column_index,
+    rawValue: row.raw_value,
+    bbox: parseJson(row.bbox_json),
+    confidence: row.confidence,
+  }));
+}
+
+function humanReview(task: TaskRow): HumanReview {
+  return {
+    reviewStatus: task.review_status ?? "PENDING",
+    reviewNote: task.review_note,
+    reviewedAt: task.reviewed_at,
+  };
+}
 
 export async function GET(
   _request: Request,
@@ -15,6 +92,21 @@ export async function GET(
     | TaskRow
     | undefined;
   if (!task) return NextResponse.json({ message: "记录不存在" }, { status: 404 });
+  const result = parseJson(task.result_json);
+  const verification = latestArtifactPayload<Phase8VerificationResult>(
+    task.id,
+    "VERIFICATION_COMPLETE",
+  );
+  const derivedFacts = latestArtifactPayload<DerivedFactsPayload>(
+    task.id,
+    "DERIVED_FACTS",
+  );
+  const validationStage =
+    latestArtifactPayload<EvidenceValidationStagePayload>(
+      task.id,
+      "EVIDENCE_VALIDATED",
+    );
+  const review = humanReview(task);
   return NextResponse.json({
     id: task.id,
     status: task.status,
@@ -23,7 +115,17 @@ export async function GET(
     estimatedOCRCalls: task.estimated_ocr_calls,
     errorCode: task.error_code,
     errorMessage: task.error_message,
-    result: task.result_json ? JSON.parse(task.result_json) : null,
+    result,
+    resultView: buildResultViewModel({
+      taskSchemaVersion: task.task_schema_version,
+      result,
+      verification,
+      derivedFacts,
+      validationStage,
+      humanReview: review,
+      tableCells: tableCellEvidence(task.id),
+    }),
+    humanReview: review,
     createdAt: task.created_at,
     completedAt: task.completed_at,
     taskSchemaVersion: task.task_schema_version,
@@ -36,11 +138,47 @@ export async function PATCH(
   context: { params: Promise<{ id: string }> },
 ) {
   const { id } = await context.params;
-  const body = (await request.json()) as { paidOverride?: boolean; retry?: boolean };
+  const body = (await request.json()) as {
+    paidOverride?: boolean;
+    retry?: boolean;
+    reviewStatus?: "PENDING" | "CONFIRMED" | "REJECTED";
+    reviewNote?: string;
+  };
   const task = db.prepare("SELECT * FROM verification_tasks WHERE id = ?").get(id) as
     | TaskRow
     | undefined;
   if (!task) return NextResponse.json({ message: "记录不存在" }, { status: 404 });
+  if (body.reviewStatus !== undefined) {
+    if (
+      body.paidOverride !== undefined ||
+      body.retry !== undefined ||
+      !["PENDING", "CONFIRMED", "REJECTED"].includes(body.reviewStatus)
+    ) {
+      return NextResponse.json({ message: "人工复核请求无效" }, { status: 400 });
+    }
+    if (task.status !== "COMPLETED") {
+      return NextResponse.json(
+        { message: "任务完成后才能提交人工复核" },
+        { status: 409 },
+      );
+    }
+    const note = body.reviewNote?.trim() || null;
+    if (note && note.length > 2000) {
+      return NextResponse.json(
+        { message: "复核备注不能超过 2000 字" },
+        { status: 400 },
+      );
+    }
+    const savedReview = saveHumanReview({
+      taskId: id,
+      reviewStatus: body.reviewStatus,
+      reviewNote: note,
+    });
+    return NextResponse.json({
+      humanReview: savedReview,
+      machineResultUnchanged: true,
+    });
+  }
   if (
     task.task_schema_version < EVIDENCE_TASK_SCHEMA_VERSION ||
     !task.extraction_version

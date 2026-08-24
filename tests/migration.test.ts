@@ -51,7 +51,7 @@ describe("forward-only database migration", () => {
       migrated
         .prepare(
           `SELECT candidate_name, result_json, task_schema_version,
-                  extraction_version
+                  extraction_version, review_status, review_note, reviewed_at
            FROM verification_tasks WHERE id='old-task'`,
         )
         .get(),
@@ -60,6 +60,9 @@ describe("forward-only database migration", () => {
       result_json: '{"candidateName":"旧候选人","legacy":true}',
       task_schema_version: 1,
       extraction_version: null,
+      review_status: "PENDING",
+      review_note: null,
+      reviewed_at: null,
     });
     expect(
       migrated
@@ -89,9 +92,9 @@ describe("forward-only database migration", () => {
     }
     expect(
       migrated
-        .prepare("SELECT version FROM schema_migrations WHERE version = 4")
+        .prepare("SELECT version FROM schema_migrations WHERE version = 5")
         .get(),
-    ).toEqual({ version: 4 });
+    ).toEqual({ version: 5 });
     migrated.close();
   });
 });

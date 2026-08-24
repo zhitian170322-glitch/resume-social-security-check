@@ -5,7 +5,7 @@ import type {
   SocialSecurityEvidenceRecord,
 } from "./schemas";
 import type { EvidenceIssue } from "./evidence-validator";
-import type { VerificationV2Item } from "./verification-engine-v2";
+import type { VerificationV2Item } from "./verification-engine-phase8";
 
 export type VerificationReport = {
   candidateName: string;

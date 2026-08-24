@@ -2,15 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-
-const stages = [
-  ["DOCUMENT_EXTRACTED", "已完成文档原始提取"],
-  ["OCR_COMPLETED", "已完成页面级 OCR"],
-  ["STRUCTURED", "已完成证据字段结构化"],
-  ["EVIDENCE_VALIDATED", "已完成原文证据校验"],
-  ["VERIFIED", "已完成确定性核验"],
-  ["COMPLETED", "已生成核验结果"],
-] as const;
+import { PROCESSING_STAGES, userFacingError } from "@/lib/result-ui-mappings";
 
 type Status = {
   status: string;
@@ -70,7 +62,7 @@ export function ProcessingView({ taskId }: { taskId: string }) {
     window.location.reload();
   }
 
-  const current = stages.findIndex(([key]) => key === task.stage);
+  const current = PROCESSING_STAGES.findIndex(([key]) => key === task.stage);
   return (
     <main className="shell narrow">
       <section className="process-card">
@@ -78,21 +70,21 @@ export function ProcessingView({ taskId }: { taskId: string }) {
         <h1>正在处理材料</h1>
         <p className="subtitle">系统仅显示真实处理阶段，完成后将自动进入结果页。</p>
         <div className="stage-list">
-          {stages.map(([key, label], index) => {
+          {PROCESSING_STAGES.map(([key, label], index) => {
             const done = current > index || task.status === "COMPLETED";
             const active = current === index;
             return (
               <div className={done ? "done" : active ? "active" : ""} key={key}>
                 <i>{done ? "✓" : active ? "●" : "○"}</i>
-                <span>{done && label.startsWith("正在") ? label.replace("正在", "已") : label}</span>
+                <span>{done ? `已完成：${label}` : active ? `正在：${label}` : `等待：${label}`}</span>
               </div>
             );
           })}
         </div>
         {task.status === "FAILED" && (
           <div className="error-panel">
-            <strong>任务处理失败</strong>
-            <p>{task.errorMessage || task.errorCode}</p>
+            <strong>{userFacingError(task.errorCode, task.errorMessage)}</strong>
+            {task.errorCode && <p>错误代码：{task.errorCode}</p>}
             <button onClick={retryFailedStage}>从失败阶段重试</button>
             <button onClick={() => router.push("/")}>返回工作台</button>
           </div>

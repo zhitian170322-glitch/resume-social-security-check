@@ -168,6 +168,9 @@ for (const definition of [
   "ocr_pages INTEGER NOT NULL DEFAULT 0",
   "deepseek_calls INTEGER NOT NULL DEFAULT 0",
   "estimated_cost REAL NOT NULL DEFAULT 0",
+  "review_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(review_status IN ('PENDING','CONFIRMED','REJECTED'))",
+  "review_note TEXT",
+  "reviewed_at TEXT",
 ]) {
   const name = definition.split(/\s+/, 1)[0];
   if (!columns.has(name)) db.exec(`ALTER TABLE verification_tasks ADD COLUMN ${definition}`);
@@ -176,7 +179,7 @@ const apiCallColumns = new Set(db.prepare("PRAGMA table_info(api_calls)").all().
 if (!apiCallColumns.has("document_id")) {
   db.exec("ALTER TABLE api_calls ADD COLUMN document_id TEXT");
 }
-db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?)")
+db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, ?)")
   .run(new Date().toISOString());
 db.exec("COMMIT");
 } catch (error) {

@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { VerificationReport } from "@/lib/result";
-import type { VerificationReportV2 } from "@/lib/result";
 import type { VerificationResult } from "@/lib/schemas";
+import type { ResultViewModel } from "@/lib/result-view-model";
 import { EvidenceResultView } from "./evidence-result-view";
 
 const statusNames: Record<string, string> = {
@@ -56,16 +56,14 @@ function allText(report: VerificationReport, onlyAnomalies = false) {
 }
 
 export function ResultView({ taskId }: { taskId: string }) {
-  const [loadedReport, setReport] = useState<
-    VerificationReport | VerificationReportV2 | null
-  >(null);
+  const [viewModel, setViewModel] = useState<ResultViewModel | null>(null);
   const [message, setMessage] = useState("");
   useEffect(() => {
     fetch(`/api/verification/${taskId}`, { cache: "no-store" })
       .then((response) => response.json())
       .then((task) => {
         if (task.status !== "COMPLETED") window.location.replace(`/processing/${taskId}`);
-        else setReport(task.result);
+        else setViewModel(task.resultView);
       });
   }, [taskId]);
 
@@ -75,14 +73,15 @@ export function ResultView({ taskId }: { taskId: string }) {
     window.setTimeout(() => setMessage(""), 1500);
   }
 
-  if (!loadedReport) return <main className="shell"><div className="empty">正在读取核验结果…</div></main>;
-  if ("schemaVersion" in loadedReport && loadedReport.schemaVersion === 2) {
-    const report = loadedReport as VerificationReportV2;
+  if (!viewModel) return <main className="shell"><div className="empty">正在读取核验结果…</div></main>;
+  if (!viewModel.legacy) {
     const text = [
-      `候选人：${report.candidateName}`,
-      `核验结论：${report.summary.conclusion}`,
-      ...report.items.map(
-        (item, index) => `${index + 1}. ${item.status}：${item.description}`,
+      `候选人：${viewModel.candidateName}`,
+      `机器核验结论：${viewModel.machineResult.label}`,
+      `证据状态：${viewModel.trustStatus.label}`,
+      `人工复核：${viewModel.humanReview.reviewStatus}`,
+      ...viewModel.items.map(
+        (item, index) => `${index + 1}. ${item.statusLabel}：${item.description}`,
       ),
     ].join("\n");
     return (
@@ -90,7 +89,7 @@ export function ResultView({ taskId }: { taskId: string }) {
         <header className="result-header">
           <div>
             <p className="eyebrow">可审计核验结果</p>
-            <h1>{report.candidateName}</h1>
+            <h1>{viewModel.candidateName}</h1>
           </div>
           <nav>
             <button className="soft-button" onClick={() => copy(text)}>复制全部</button>
@@ -98,12 +97,19 @@ export function ResultView({ taskId }: { taskId: string }) {
             <Link className="soft-button" href="/">新建核验</Link>
           </nav>
         </header>
-        <EvidenceResultView report={report} copy={copy} />
+        <EvidenceResultView model={viewModel} copy={copy} taskId={taskId} />
         {message && <div className="toast">{message}</div>}
       </main>
     );
   }
-  const report = loadedReport as VerificationReport;
+  const report = viewModel.report;
+  if (!report) {
+    return (
+      <main className="shell">
+        <div className="empty">旧版本任务没有可显示的结果数据。</div>
+      </main>
+    );
+  }
   const stats = [
     ["简历声明经历", report.summary.resumeExperienceCount],
     ["社保实际单位", report.summary.socialSecurityCompanyCount],
@@ -145,6 +151,7 @@ export function ResultView({ taskId }: { taskId: string }) {
       <section className="summary-card evidence-warning">
         <strong>旧版本任务，无完整证据链</strong>
         <p>以下结果按历史结构展示，不能追溯到字段级原文证据，建议人工复核。</p>
+        <p>人工复核状态：{viewModel.humanReview.reviewStatus}</p>
       </section>
       <section className="stat-grid">
         {stats.map(([label, value]) => <div className="stat" key={label}><span>{label}</span><b>{value}</b></div>)}
