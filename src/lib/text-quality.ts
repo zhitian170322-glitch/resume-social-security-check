@@ -46,6 +46,7 @@ export interface TextQualityEvaluatorConfig {
   penaltyDuplicateCharacters: number;
   penaltyAbnormalUnicode: number;
   highQualityScoreThreshold: number;
+  lowQualityScoreThreshold: number;
   ocrScoreThreshold: number;
   ocrWarningCountThreshold: number;
 }
@@ -87,8 +88,9 @@ export const DEFAULT_TEXT_QUALITY_CONFIG: Readonly<TextQualityEvaluatorConfig> =
     penaltyDuplicateCharacters: 12,
     penaltyAbnormalUnicode: 12,
     highQualityScoreThreshold: 75,
+    lowQualityScoreThreshold: 40,
     ocrScoreThreshold: 60,
-    ocrWarningCountThreshold: 3,
+    ocrWarningCountThreshold: 1,
   });
 
 export interface TextQualityMetrics {
@@ -434,10 +436,12 @@ export class TextQualityEvaluator {
     if (ocrRecommended) warnings.push("ocr_recommended");
     const qualityLevel =
       blankPage ||
+      tooShort ||
       excessiveReplacementCharacters ||
-      score < this.config.ocrScoreThreshold
+      score < this.config.lowQualityScoreThreshold
         ? "LOW"
         : score >= this.config.highQualityScoreThreshold &&
+            warnings.length === 0 &&
             !possibleTwoColumn &&
             !possibleTableLoss &&
             !textOrderSuspicious

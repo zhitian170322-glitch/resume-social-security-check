@@ -114,4 +114,29 @@ describe("TextQualityEvaluator", () => {
     expect(result.ocrRecommended).toBe(false);
     expect(DEFAULT_TEXT_QUALITY_CONFIG.minimumDatesForAlignmentCheck).toBe(2);
   });
+
+  it("keeps OCR-recommended pages above the low-quality threshold", () => {
+    const evaluator = new TextQualityEvaluator({
+      minimumUsefulCharacters: 0,
+      penaltyDateCompanyAlignment: 40,
+      ocrWarningCountThreshold: 99,
+      highQualityScoreThreshold: 75,
+      ocrScoreThreshold: 75,
+      lowQualityScoreThreshold: 40,
+    });
+    const result = evaluator.evaluate(
+      [
+        "2022.03 负责企业级系统研发、测试、发布和线上维护工作",
+        "主要职责包括需求分析、接口设计、性能优化和故障处理",
+        "2020.01 负责业务平台开发、数据库设计以及项目交付工作",
+      ].join("\n"),
+    );
+
+    expect(result.score).toBeGreaterThanOrEqual(40);
+    expect(result.score).toBeLessThanOrEqual(75);
+    expect(result.qualityLevel).toBe("MEDIUM");
+    expect(result.ocrRecommended).toBe(true);
+    expect(DEFAULT_TEXT_QUALITY_CONFIG.lowQualityScoreThreshold).toBe(40);
+    expect(DEFAULT_TEXT_QUALITY_CONFIG.ocrWarningCountThreshold).toBe(1);
+  });
 });
