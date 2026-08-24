@@ -33,8 +33,8 @@ describe("Evidence Validator", () => {
       experiences: [
         {
           resumeCompany: evidence("腾讯科技有限公司", "2022.03-2024.05\n腾讯科技"),
-          resumeStartMonth: evidence("2022-03", "2022.03-2024.05"),
-          resumeEndMonth: evidence("2024-05", "2022.03-2024.05"),
+          resumeStartMonth: evidence("2022-03", "2022.03-2024.05\n腾讯科技"),
+          resumeEndMonth: evidence("2024-05", "2022.03-2024.05\n腾讯科技"),
           warnings: [],
         },
       ],
@@ -53,8 +53,8 @@ describe("Evidence Validator", () => {
       experiences: [
         {
           resumeCompany: evidence("腾讯科技", "2022.03-2024.05\n腾讯科技"),
-          resumeStartMonth: evidence("2022-03", "2022.03-2024.05"),
-          resumeEndMonth: evidence("2024-05", "2022.03-2024.05"),
+          resumeStartMonth: evidence("2022-03", "2022.03-2024.05\n腾讯科技"),
+          resumeEndMonth: evidence("2024-05", "2022.03-2024.05\n腾讯科技"),
           warnings: [],
         },
       ],
