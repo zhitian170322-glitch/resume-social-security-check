@@ -103,7 +103,7 @@ function pageDecision(
 > {
   const rawText = analysisPage.localText;
   const quality = new TextQualityEvaluator().evaluate(rawText ?? "");
-  const warnings = [...quality.warnings];
+  const warnings: string[] = [...quality.warnings];
   let pageType: DocumentPageType = "TEXT";
   let extractionMethod: DocumentExtractionMethod = "PDF_TEXT";
   let selectedText = rawText;
