@@ -1,4 +1,3 @@
-import { extname } from "node:path";
 import sharp from "sharp";
 import { db, type TaskRow } from "./db";
 import { config } from "./config";
@@ -108,6 +107,7 @@ function generalOCR(task: TaskRow): OCRProvider {
   let provider: AliyunOCRProvider | null = null;
   return {
     async recognize(input: Buffer, mimeType: string): Promise<OCRResult> {
+      void mimeType;
       const key = contentHash(`aliyun:RecognizeGeneral:${contentHash(input)}`);
       const cached = readExtractionCache<OCRResult>(key);
       if (cached) {
@@ -124,7 +124,7 @@ function generalOCR(task: TaskRow): OCRProvider {
       provider ??= new AliyunOCRProvider();
       const started = Date.now();
       try {
-        const result = await provider.recognize(input, mimeType);
+        const result = await provider.recognize(input);
         recordOCRCall(task.id, Boolean(task.paid_override), "RecognizeGeneral");
         recordApiCall({
           taskId: task.id,

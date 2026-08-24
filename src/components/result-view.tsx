@@ -56,7 +56,9 @@ function allText(report: VerificationReport, onlyAnomalies = false) {
 }
 
 export function ResultView({ taskId }: { taskId: string }) {
-  const [report, setReport] = useState<VerificationReport | VerificationReportV2 | null>(null);
+  const [loadedReport, setReport] = useState<
+    VerificationReport | VerificationReportV2 | null
+  >(null);
   const [message, setMessage] = useState("");
   useEffect(() => {
     fetch(`/api/verification/${taskId}`, { cache: "no-store" })
@@ -73,8 +75,9 @@ export function ResultView({ taskId }: { taskId: string }) {
     window.setTimeout(() => setMessage(""), 1500);
   }
 
-  if (!report) return <main className="shell"><div className="empty">正在读取核验结果…</div></main>;
-  if ("schemaVersion" in report && report.schemaVersion === 2) {
+  if (!loadedReport) return <main className="shell"><div className="empty">正在读取核验结果…</div></main>;
+  if ("schemaVersion" in loadedReport && loadedReport.schemaVersion === 2) {
+    const report = loadedReport as VerificationReportV2;
     const text = [
       `候选人：${report.candidateName}`,
       `核验结论：${report.summary.conclusion}`,
@@ -100,6 +103,7 @@ export function ResultView({ taskId }: { taskId: string }) {
       </main>
     );
   }
+  const report = loadedReport as VerificationReport;
   const stats = [
     ["简历声明经历", report.summary.resumeExperienceCount],
     ["社保实际单位", report.summary.socialSecurityCompanyCount],

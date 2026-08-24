@@ -105,7 +105,7 @@ export async function extractResumeDocumentPages(input: {
     let ocrText: string | null = null;
     let ocrConfidence: number | null = null;
     let ocrQualityScore: number | null = null;
-    const warnings = [...pdfQuality.warnings];
+    const warnings: string[] = [...pdfQuality.warnings];
     if (shouldOCR) {
       if (!input.ocr) throw new Error("阿里云 OCR 凭证未配置");
       const image = await renderPdfPage(input.path, page.page);
