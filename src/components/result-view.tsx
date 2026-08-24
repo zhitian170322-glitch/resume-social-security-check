@@ -85,7 +85,7 @@ export function ResultView({ taskId }: { taskId: string }) {
       ),
     ].join("\n");
     return (
-      <main className="shell">
+      <main className="shell result-shell">
         <header className="result-header">
           <div>
             <p className="eyebrow">可审计核验结果</p>
