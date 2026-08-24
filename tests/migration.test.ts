@@ -43,6 +43,9 @@ describe("forward-only database migration", () => {
     await exec("node", [resolve("scripts/init-db.mjs")], {
       env: { ...process.env, DATABASE_URL: `file:${path}` },
     });
+    await exec("node", [resolve("scripts/init-db.mjs")], {
+      env: { ...process.env, DATABASE_URL: `file:${path}` },
+    });
     const migrated = new Database(path);
     expect(
       migrated
