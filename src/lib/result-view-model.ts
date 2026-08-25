@@ -7,7 +7,10 @@ import type {
   EvidenceStringField,
   Phase8MatchStatus,
   Phase8TaskConclusion,
+  ResumeEvidenceExperience,
+  SocialSecurityEvidenceRecord,
 } from "./schemas";
+import { monthIndex } from "./schemas";
 import type {
   DerivedFactsPayload,
   EvidenceValidationStagePayload,
@@ -57,6 +60,61 @@ export type ResultEvidenceDisplay = {
   tableCells: TableCellDisplay[];
 };
 
+export type BusinessMonthStatus =
+  | "MATCH"
+  | "SOCIAL_EARLIER"
+  | "SOCIAL_LATER"
+  | "SOCIAL_EARLY_END"
+  | "SOCIAL_LATE_END"
+  | "MISSING"
+  | "MANUAL_REVIEW_REQUIRED";
+
+export type VerificationBusinessResult = {
+  scenario:
+    | "MATCHED_RECORDS"
+    | "RESUME_WITHOUT_SOCIAL_RECORD"
+    | "UNDECLARED_SOCIAL_RECORD"
+    | "MANUAL_REVIEW_REQUIRED";
+  scenarioMessage: string;
+  resume: {
+    companyRaw: string | null;
+    position: string | null;
+    startMonth: string | null;
+    endMonth: string | null;
+    fieldStatus: {
+      companyRaw: DisplayEvidenceStatus;
+      position: DisplayEvidenceStatus;
+      startMonth: DisplayEvidenceStatus;
+      endMonth: DisplayEvidenceStatus;
+    };
+  } | null;
+  social: {
+    companyRaw: string | null;
+    startMonth: string | null;
+    endMonth: string | null;
+    paidMonthCount: number | null;
+    paidYears: number | null;
+    paidRemainingMonths: number | null;
+    paidDuration: string | null;
+    gapMonths: string[];
+    gapSummary: string;
+  } | null;
+  comparison: {
+    companyMatch:
+      | "EXACT"
+      | "NORMALIZED_MATCH"
+      | "FUZZY_CANDIDATE"
+      | "NO_MATCH";
+    startMonthStatus: BusinessMonthStatus;
+    startDifferenceMonths: number | null;
+    startMessage: string;
+    endMonthStatus: BusinessMonthStatus;
+    endDifferenceMonths: number | null;
+    endMessage: string;
+    reviewRequiredFields: string[];
+  };
+};
+
 export type ResultViewItem = {
   id: string;
   matchStatus: Phase8MatchStatus;
@@ -85,6 +143,7 @@ export type ResultViewItem = {
   rules: string[];
   evidence: ResultEvidenceDisplay[];
   derivedFact: DerivedFactsPayload["socialSecurity"][number] | null;
+  businessResult: VerificationBusinessResult;
 };
 
 export type ResultViewModel =
@@ -197,6 +256,12 @@ function flattenEvidenceFields(report: VerificationReportV2) {
         evidence: experience.resumeEndMonth,
       },
     );
+    if (experience.position) {
+      values.push({
+        field: `resume.${index}.position`,
+        evidence: experience.position,
+      });
+    }
   });
   report.socialSecurityRecords.forEach((record, index) => {
     values.push(
@@ -281,6 +346,397 @@ function rawFieldValue(field: EvidenceField | undefined) {
   return Array.isArray(field.value)
     ? field.value.join("、")
     : String(field.value);
+}
+
+export function formatPaidDuration(
+  paidYears: number,
+  paidRemainingMonths: number,
+) {
+  if (paidYears === 0) return `${paidRemainingMonths}个月`;
+  if (paidRemainingMonths === 0) return `${paidYears}年`;
+  return `${paidYears}年${paidRemainingMonths}个月`;
+}
+
+function matchingFieldIssues(
+  issues: EvidenceIssue[],
+  domain: "resume" | "social",
+  index: number,
+  aliases: string[],
+) {
+  const prefixes =
+    domain === "resume"
+      ? [`experiences.${index}.`, `resume.${index}.`]
+      : [`records.${index}.`, `social.${index}.`];
+  return issues.filter((issue) => {
+    const field = issue.field.toLowerCase();
+    return (
+      prefixes.some((prefix) => field.includes(prefix.toLowerCase())) &&
+      aliases.some((alias) => field.includes(alias.toLowerCase()))
+    );
+  });
+}
+
+function findResumeExperience(
+  report: VerificationReportV2,
+  sourceItem: Partial<VerificationV2Item>,
+): { value: ResumeEvidenceExperience; index: number } | null {
+  if (
+    sourceItem.rawResumeCompanyName == null &&
+    sourceItem.rawSocialSecurityCompanyName == null &&
+    report.resumeExtraction.experiences.length === 1
+  ) {
+    return { value: report.resumeExtraction.experiences[0], index: 0 };
+  }
+  const candidates = report.resumeExtraction.experiences
+    .map((value, index) => ({ value, index }))
+    .filter(
+      ({ value }) =>
+        value.resumeCompany.value === sourceItem.rawResumeCompanyName,
+    );
+  if (!candidates.length) return null;
+  return (
+    candidates.find(
+      ({ value }) =>
+        !sourceItem.resumePeriod ||
+        (value.resumeStartMonth.value === sourceItem.resumePeriod.startMonth &&
+          value.resumeEndMonth.value === sourceItem.resumePeriod.endMonth),
+    ) ?? candidates[0]
+  );
+}
+
+function findSocialRecord(
+  report: VerificationReportV2,
+  sourceItem: Partial<VerificationV2Item>,
+): { value: SocialSecurityEvidenceRecord; index: number } | null {
+  if (
+    sourceItem.rawResumeCompanyName == null &&
+    sourceItem.rawSocialSecurityCompanyName == null &&
+    report.socialSecurityRecords.length === 1
+  ) {
+    return { value: report.socialSecurityRecords[0], index: 0 };
+  }
+  const candidates = report.socialSecurityRecords
+    .map((value, index) => ({ value, index }))
+    .filter(
+      ({ value }) =>
+        value.companyRaw.value === sourceItem.rawSocialSecurityCompanyName,
+    );
+  if (!candidates.length) return null;
+  return (
+    candidates.find(
+      ({ value }) =>
+        !sourceItem.socialSecurityPeriod ||
+        (value.startMonth.value ===
+          sourceItem.socialSecurityPeriod.startMonth &&
+          value.endMonth.value === sourceItem.socialSecurityPeriod.endMonth),
+    ) ?? candidates[0]
+  );
+}
+
+function dateComparison(input: {
+  kind: "start" | "end";
+  resumeValue: string | null;
+  socialValue: string | null;
+  resumeStatus: DisplayEvidenceStatus;
+  socialStatus: DisplayEvidenceStatus;
+}): {
+  status: BusinessMonthStatus;
+  differenceMonths: number | null;
+  message: string;
+} {
+  if (
+    input.resumeStatus === "MISSING" ||
+    input.socialStatus === "MISSING" ||
+    !input.resumeValue ||
+    !input.socialValue
+  ) {
+    return {
+      status: "MISSING",
+      differenceMonths: null,
+      message: "缺少可比较的月份。",
+    };
+  }
+  if (
+    input.resumeStatus !== "VALIDATED" ||
+    input.socialStatus !== "VALIDATED"
+  ) {
+    return {
+      status: "MANUAL_REVIEW_REQUIRED",
+      differenceMonths: null,
+      message: `${input.kind === "start" ? "开始" : "结束"}时间需人工确认。`,
+    };
+  }
+  const signedDifference =
+    monthIndex(input.socialValue) - monthIndex(input.resumeValue);
+  const differenceMonths = Math.abs(signedDifference);
+  if (signedDifference === 0) {
+    return {
+      status: "MATCH",
+      differenceMonths: 0,
+      message: `${input.kind === "start" ? "开始" : "结束"}时间一致。`,
+    };
+  }
+  if (input.kind === "start") {
+    return signedDifference > 0
+      ? {
+          status: "SOCIAL_LATER",
+          differenceMonths,
+          message: `社保缴纳比简历入职时间晚 ${differenceMonths} 个月。`,
+        }
+      : {
+          status: "SOCIAL_EARLIER",
+          differenceMonths,
+          message: `社保缴纳比简历入职时间早 ${differenceMonths} 个月。`,
+        };
+  }
+  return signedDifference < 0
+    ? {
+        status: "SOCIAL_EARLY_END",
+        differenceMonths,
+        message: `社保比简历工作结束时间早 ${differenceMonths} 个月停止缴纳。`,
+      }
+    : {
+        status: "SOCIAL_LATE_END",
+        differenceMonths,
+        message: `社保比简历工作结束时间晚 ${differenceMonths} 个月停止缴纳。`,
+      };
+}
+
+function businessResult(input: {
+  report: VerificationReportV2;
+  sourceItem: Partial<VerificationV2Item>;
+  matchStatus: Phase8MatchStatus;
+  derivedFact: DerivedFactsPayload["socialSecurity"][number] | null;
+}): VerificationBusinessResult {
+  const derivedForDisplay = input.derivedFact as
+    | (DerivedFactsPayload["socialSecurity"][number] & {
+        paidMonthCount?: number;
+        paidYears?: number;
+        paidRemainingMonths?: number;
+        paidDuration?: string;
+        gapMonths?: string[];
+      })
+    | null;
+  const resumeMatch = findResumeExperience(input.report, input.sourceItem);
+  const socialMatch = findSocialRecord(input.report, input.sourceItem);
+  const resume = resumeMatch?.value;
+  const social = socialMatch?.value;
+  const resumeStatus = {
+    companyRaw: fieldDisplayStatus(
+      resume?.resumeCompany,
+      resumeMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "resume",
+            resumeMatch.index,
+            ["company", "companyRaw"],
+          )
+        : [],
+    ),
+    position: resume?.position
+      ? fieldDisplayStatus(
+          resume.position,
+          resumeMatch
+            ? matchingFieldIssues(
+                input.report.evidenceIssues,
+                "resume",
+                resumeMatch.index,
+                ["position"],
+              )
+            : [],
+        )
+      : "MISSING",
+    startMonth: fieldDisplayStatus(
+      resume?.resumeStartMonth,
+      resumeMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "resume",
+            resumeMatch.index,
+            ["start", "startMonth"],
+          )
+        : [],
+    ),
+    endMonth: fieldDisplayStatus(
+      resume?.resumeEndMonth,
+      resumeMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "resume",
+            resumeMatch.index,
+            ["end", "endMonth"],
+          )
+        : [],
+    ),
+  };
+  const socialStatus = {
+    companyRaw: fieldDisplayStatus(
+      social?.companyRaw,
+      socialMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "social",
+            socialMatch.index,
+            ["company", "companyRaw"],
+          )
+        : [],
+    ),
+    startMonth: fieldDisplayStatus(
+      social?.startMonth,
+      socialMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "social",
+            socialMatch.index,
+            ["start", "startMonth"],
+          )
+        : [],
+    ),
+    endMonth: fieldDisplayStatus(
+      social?.endMonth,
+      socialMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "social",
+            socialMatch.index,
+            ["end", "endMonth"],
+          )
+        : [],
+    ),
+    paidMonths: fieldDisplayStatus(
+      social?.paidMonths,
+      socialMatch
+        ? matchingFieldIssues(
+            input.report.evidenceIssues,
+            "social",
+            socialMatch.index,
+            ["paidMonths"],
+          )
+        : [],
+    ),
+  };
+  const start = dateComparison({
+    kind: "start",
+    resumeValue: resume?.resumeStartMonth.value ?? null,
+    socialValue: social?.startMonth.value ?? null,
+    resumeStatus: resumeStatus.startMonth,
+    socialStatus: socialStatus.startMonth,
+  });
+  const end = dateComparison({
+    kind: "end",
+    resumeValue: resume?.resumeEndMonth.value ?? null,
+    socialValue: social?.endMonth.value ?? null,
+    resumeStatus: resumeStatus.endMonth,
+    socialStatus: socialStatus.endMonth,
+  });
+  const reviewRequiredFields: string[] = [];
+  const addReview = (field: string, status: DisplayEvidenceStatus) => {
+    if (status !== "VALIDATED" && !reviewRequiredFields.includes(field)) {
+      reviewRequiredFields.push(field);
+    }
+  };
+  if (resume) {
+    addReview("resume.companyRaw", resumeStatus.companyRaw);
+    addReview("resume.position", resumeStatus.position);
+    addReview("resume.startMonth", resumeStatus.startMonth);
+    addReview("resume.endMonth", resumeStatus.endMonth);
+  }
+  if (social) {
+    addReview("social.companyRaw", socialStatus.companyRaw);
+    addReview("social.startMonth", socialStatus.startMonth);
+    addReview("social.endMonth", socialStatus.endMonth);
+    addReview("social.paidMonths", socialStatus.paidMonths);
+  }
+  const paidMonths =
+    input.derivedFact?.paidMonths ??
+    (input.sourceItem.paidMonths?.length
+      ? input.sourceItem.paidMonths
+      : (social?.paidMonths.value ?? []));
+  const paidMonthCount = social
+    ? (derivedForDisplay?.paidMonthCount ?? paidMonths.length)
+    : null;
+  const paidYears =
+    paidMonthCount === null
+      ? null
+      : (derivedForDisplay?.paidYears ??
+        Math.floor(paidMonthCount / 12));
+  const paidRemainingMonths =
+    paidMonthCount === null
+      ? null
+      : (derivedForDisplay?.paidRemainingMonths ??
+        paidMonthCount % 12);
+  const gapMonths = social
+    ? [...(derivedForDisplay?.gapMonths ?? input.sourceItem.gapMonths ?? [])]
+    : [];
+  const scenario =
+    input.matchStatus === "MANUAL_REVIEW_REQUIRED" ||
+    input.matchStatus === "INSUFFICIENT_EVIDENCE"
+      ? "MANUAL_REVIEW_REQUIRED"
+      : input.matchStatus === "RESUME_ONLY"
+      ? "RESUME_WITHOUT_SOCIAL_RECORD"
+      : input.matchStatus === "SOCIAL_SECURITY_ONLY"
+        ? "UNDECLARED_SOCIAL_RECORD"
+        : resume && social
+          ? "MATCHED_RECORDS"
+          : "MANUAL_REVIEW_REQUIRED";
+  const scenarioMessage =
+    scenario === "RESUME_WITHOUT_SOCIAL_RECORD"
+      ? "该段简历经历未找到对应社保单位记录。"
+      : scenario === "UNDECLARED_SOCIAL_RECORD"
+        ? "社保存在简历未体现的缴纳单位。"
+        : scenario === "MATCHED_RECORDS"
+          ? "已找到可比较的简历经历与社保记录。"
+          : "记录关联关系需要人工确认。";
+  return {
+    scenario,
+    scenarioMessage,
+    resume: resume
+      ? {
+          companyRaw: resume.resumeCompany.value,
+          position: resume.position?.value ?? null,
+          startMonth: resume.resumeStartMonth.value,
+          endMonth: resume.resumeEndMonth.value,
+          fieldStatus: resumeStatus,
+        }
+      : null,
+    social: social
+      ? {
+          companyRaw: social.companyRaw.value,
+          startMonth: social.startMonth.value,
+          endMonth: social.endMonth.value,
+          paidMonthCount,
+          paidYears,
+          paidRemainingMonths,
+          paidDuration:
+            paidYears === null || paidRemainingMonths === null
+              ? null
+              : (derivedForDisplay?.paidDuration ??
+                formatPaidDuration(paidYears, paidRemainingMonths)),
+          gapMonths,
+          gapSummary: gapMonths.length
+            ? `${gapMonths.length}个月`
+            : "无",
+        }
+      : null,
+    comparison: {
+      companyMatch:
+        input.sourceItem.companyMatchType ??
+        (resume?.resumeCompany.value &&
+        social?.companyRaw.value &&
+        resumeStatus.companyRaw === "VALIDATED" &&
+        socialStatus.companyRaw === "VALIDATED" &&
+        resume.resumeCompany.value === social.companyRaw.value
+          ? "EXACT"
+          : "NO_MATCH"),
+      startMonthStatus: start.status,
+      startDifferenceMonths: start.differenceMonths,
+      startMessage: start.message,
+      endMonthStatus: end.status,
+      endDifferenceMonths: end.differenceMonths,
+      endMessage: end.message,
+      reviewRequiredFields,
+    },
+  };
 }
 
 function specialLabels(item: {
@@ -478,6 +934,12 @@ export function buildResultViewModel(input: {
       rules: sourceItem.rules ?? [],
       evidence,
       derivedFact,
+      businessResult: businessResult({
+        report,
+        sourceItem,
+        matchStatus,
+        derivedFact,
+      }),
     };
   });
   return {

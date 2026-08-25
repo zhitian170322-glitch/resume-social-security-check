@@ -3,6 +3,7 @@ import type { EvidenceIssue } from "./evidence-validator";
 import type { VerificationReport, VerificationReportV2 } from "./result";
 import {
   buildResultViewModel,
+  formatPaidDuration,
   readStoredArtifactPayload,
   type HumanReview,
 } from "./result-view-model";
@@ -123,6 +124,10 @@ function report(items = [item()], issues: EvidenceIssue[] = []): VerificationRep
             ...text("甲公司"),
             extractionMethod: "deepseek",
           },
+          position: {
+            ...text("Java开发工程师"),
+            extractionMethod: "deepseek",
+          },
           resumeStartMonth: {
             ...month("2022-03"),
             extractionMethod: "deepseek",
@@ -184,15 +189,19 @@ function model(input?: {
   verificationItem?: VerificationV2Item;
   issues?: EvidenceIssue[];
   humanReview?: HumanReview;
+  derivedPaidMonths?: string[];
+  mutateReport?: (value: VerificationReportV2) => void;
 }) {
   const verificationItem = input?.verificationItem ?? item();
   const verification: Phase8VerificationResult = {
     conclusion: input?.conclusion ?? "CONSISTENT",
     items: [verificationItem],
   };
+  const result = report([verificationItem], input?.issues);
+  input?.mutateReport?.(result);
   return buildResultViewModel({
     taskSchemaVersion: 2,
-    result: report([verificationItem], input?.issues),
+    result,
     verification,
     derivedFacts: {
       versions: {
@@ -210,7 +219,8 @@ function model(input?: {
           companyEvidenceRefs: ["synthetic-cell"],
           startMonth: "2022-03",
           endMonth: "2022-04",
-          paidMonths: ["2022-03", "2022-04"],
+          paidMonths:
+            input?.derivedPaidMonths ?? ["2022-03", "2022-04"],
           paidMonthsSource: "VALIDATED_MONTHLY_EVIDENCE",
           paidMonthsEvidenceRefs: ["synthetic-cell"],
         },
@@ -270,10 +280,173 @@ describe("[synthetic] Phase 9 Result UI mapping", () => {
           rawResumeCompanyName: "甲公司",
           rawSocialSecurityCompanyName: "甲公司",
           normalizedCompanyName: "甲",
+          businessResult: expect.objectContaining({
+            comparison: expect.objectContaining({
+              companyMatch: type,
+            }),
+          }),
         }),
       ],
     });
   });
+
+  it.each([
+    {
+      name: "开始时间一致",
+      resumeStart: "2022-03",
+      socialStart: "2022-03",
+      expectedStatus: "MATCH",
+      expectedDifference: 0,
+      expectedMessage: "开始时间一致。",
+    },
+    {
+      name: "社保晚一个月",
+      resumeStart: "2022-03",
+      socialStart: "2022-04",
+      expectedStatus: "SOCIAL_LATER",
+      expectedDifference: 1,
+      expectedMessage: "社保缴纳比简历入职时间晚 1 个月。",
+    },
+    {
+      name: "社保早一个月",
+      resumeStart: "2022-03",
+      socialStart: "2022-02",
+      expectedStatus: "SOCIAL_EARLIER",
+      expectedDifference: 1,
+      expectedMessage: "社保缴纳比简历入职时间早 1 个月。",
+    },
+  ] as const)(
+    "[synthetic] maps $name deterministically",
+    ({
+      resumeStart,
+      socialStart,
+      expectedStatus,
+      expectedDifference,
+      expectedMessage,
+    }) => {
+      const verificationItem = item();
+      verificationItem.resumePeriod = {
+        startMonth: resumeStart,
+        endMonth: "2024-03",
+      };
+      verificationItem.socialSecurityPeriod = {
+        startMonth: socialStart,
+        endMonth: "2024-03",
+      };
+      const mapped = model({
+        verificationItem,
+        mutateReport(value) {
+          value.resumeExtraction.experiences[0].resumeStartMonth.value =
+            resumeStart;
+          value.resumeExtraction.experiences[0].resumeEndMonth.value =
+            "2024-03";
+          value.socialSecurityRecords[0].startMonth.value = socialStart;
+          value.socialSecurityRecords[0].endMonth.value = "2024-03";
+        },
+      });
+      expect(mapped).toMatchObject({
+        legacy: false,
+        items: [
+          {
+            businessResult: {
+              comparison: {
+                startMonthStatus: expectedStatus,
+                startDifferenceMonths: expectedDifference,
+                startMessage: expectedMessage,
+              },
+            },
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: "社保提前结束",
+      resumeEnd: "2024-03",
+      socialEnd: "2024-01",
+      expectedStatus: "SOCIAL_EARLY_END",
+      expectedDifference: 2,
+    },
+    {
+      name: "社保延后结束",
+      resumeEnd: "2024-03",
+      socialEnd: "2024-05",
+      expectedStatus: "SOCIAL_LATE_END",
+      expectedDifference: 2,
+    },
+  ] as const)(
+    "[synthetic] maps $name without changing engine verdict",
+    ({ resumeEnd, socialEnd, expectedStatus, expectedDifference }) => {
+      const verificationItem = item();
+      verificationItem.resumePeriod = {
+        startMonth: "2022-03",
+        endMonth: resumeEnd,
+      };
+      verificationItem.socialSecurityPeriod = {
+        startMonth: "2022-03",
+        endMonth: socialEnd,
+      };
+      const mapped = model({
+        verificationItem,
+        mutateReport(value) {
+          value.resumeExtraction.experiences[0].resumeEndMonth.value =
+            resumeEnd;
+          value.socialSecurityRecords[0].endMonth.value = socialEnd;
+        },
+      });
+      expect(mapped).toMatchObject({
+        legacy: false,
+        items: [
+          {
+            businessResult: {
+              comparison: {
+                endMonthStatus: expectedStatus,
+                endDifferenceMonths: expectedDifference,
+              },
+            },
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    [29, 2, 5, "2年5个月"],
+    [8, 0, 8, "8个月"],
+    [24, 2, 0, "2年"],
+  ] as const)(
+    "[synthetic] maps %i validated paid months to business duration",
+    (count, years, remaining, label) => {
+      const paidMonths = Array.from(
+        { length: count },
+        (_, index) => `${2020 + Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}`,
+      );
+      const verificationItem = item();
+      verificationItem.paidMonths = paidMonths;
+      const mapped = model({
+        verificationItem,
+        derivedPaidMonths: paidMonths,
+      });
+      expect(mapped).toMatchObject({
+        legacy: false,
+        items: [
+          {
+            businessResult: {
+              social: {
+                paidMonthCount: count,
+                paidYears: years,
+                paidRemainingMonths: remaining,
+                paidDuration: label,
+              },
+            },
+          },
+        ],
+      });
+      expect(formatPaidDuration(years, remaining)).toBe(label);
+    },
+  );
 
   it("[synthetic] I: displays paidMonths and supplied gap without recalculation", () => {
     const value = item("GAP_DETECTED");
@@ -289,7 +462,166 @@ describe("[synthetic] Phase 9 Result UI mapping", () => {
           missingMonths: ["2022-04"],
           gapMonths: ["2022-04"],
           specialLabels: ["月份断缴"],
+          businessResult: expect.objectContaining({
+            social: expect.objectContaining({
+              gapMonths: ["2022-04"],
+              gapSummary: "1个月",
+            }),
+          }),
         }),
+      ],
+    });
+  });
+
+  it("[synthetic] maps no gaps and multiple supplied gaps without guessing", () => {
+    const noGap = model();
+    const value = item("GAP_DETECTED");
+    value.gapMonths = ["2023-03", "2023-07"];
+    const multiple = model({ verificationItem: value });
+    expect(noGap).toMatchObject({
+      legacy: false,
+      items: [{ businessResult: { social: { gapMonths: [], gapSummary: "无" } } }],
+    });
+    expect(multiple).toMatchObject({
+      legacy: false,
+      items: [
+        {
+          businessResult: {
+            social: {
+              gapMonths: ["2023-03", "2023-07"],
+              gapSummary: "2个月",
+            },
+          },
+        },
+      ],
+    });
+  });
+
+  it("[synthetic] maps resume-only and social-only records with neutral factual copy", () => {
+    const resumeOnly = item("RESUME_ONLY");
+    resumeOnly.rawSocialSecurityCompanyName = null;
+    resumeOnly.socialSecurityPeriod = null;
+    resumeOnly.companyMatchType = null;
+    const socialOnly = item("SOCIAL_SECURITY_ONLY");
+    socialOnly.rawResumeCompanyName = null;
+    socialOnly.resumePeriod = null;
+    socialOnly.companyMatchType = null;
+
+    expect(model({ verificationItem: resumeOnly })).toMatchObject({
+      legacy: false,
+      items: [
+        {
+          businessResult: {
+            scenario: "RESUME_WITHOUT_SOCIAL_RECORD",
+            scenarioMessage: "该段简历经历未找到对应社保单位记录。",
+            resume: { companyRaw: "甲公司" },
+            social: null,
+          },
+        },
+      ],
+    });
+    expect(model({ verificationItem: socialOnly })).toMatchObject({
+      legacy: false,
+      items: [
+        {
+          businessResult: {
+            scenario: "UNDECLARED_SOCIAL_RECORD",
+            scenarioMessage: "社保存在简历未体现的缴纳单位。",
+            resume: null,
+            social: { companyRaw: "甲公司" },
+          },
+        },
+      ],
+    });
+  });
+
+  it("[synthetic] keeps one uncertain end field local to that comparison", () => {
+    const blockedItem = item("MANUAL_REVIEW_REQUIRED");
+    blockedItem.companyMatchType = null;
+    blockedItem.rawResumeCompanyName = null;
+    blockedItem.rawSocialSecurityCompanyName = null;
+    blockedItem.resumePeriod = null;
+    blockedItem.socialSecurityPeriod = null;
+    blockedItem.paidMonths = [];
+    blockedItem.requiresManualReview = true;
+    const mapped = model({
+      conclusion: "MANUAL_REVIEW_REQUIRED",
+      verificationItem: blockedItem,
+      mutateReport(value) {
+        value.resumeExtraction.experiences[0].resumeEndMonth.status =
+          "uncertain";
+      },
+    });
+    expect(mapped).toMatchObject({
+      legacy: false,
+      items: [
+        {
+          businessResult: {
+            scenario: "MANUAL_REVIEW_REQUIRED",
+            resume: {
+              companyRaw: "甲公司",
+              position: "Java开发工程师",
+              fieldStatus: {
+                companyRaw: "VALIDATED",
+                position: "VALIDATED",
+                startMonth: "VALIDATED",
+                endMonth: "UNCERTAIN",
+              },
+            },
+            social: {
+              companyRaw: "甲公司",
+              paidMonthCount: 2,
+            },
+            comparison: {
+              companyMatch: "EXACT",
+              startMonthStatus: "MATCH",
+              endMonthStatus: "MANUAL_REVIEW_REQUIRED",
+              reviewRequiredFields: ["resume.endMonth"],
+            },
+          },
+        },
+      ],
+    });
+  });
+
+  it("[synthetic] preserves both raw company names and technical Evidence", () => {
+    const verificationItem = item();
+    verificationItem.rawResumeCompanyName = "深圳市甲科技有限公司";
+    verificationItem.rawSocialSecurityCompanyName = "甲科技";
+    verificationItem.companyMatchType = "FUZZY_CANDIDATE";
+    const mapped = model({
+      verificationItem,
+      mutateReport(value) {
+        value.resumeExtraction.experiences[0].resumeCompany.value =
+          "深圳市甲科技有限公司";
+        value.socialSecurityRecords[0].companyRaw.value = "甲科技";
+      },
+      issues: [
+        {
+          code: "OCR_CONFIDENCE_LOW",
+          field: "records.0.companyRaw",
+          sourceFile: "synthetic.pdf",
+          sourcePage: 1,
+          message: "technical detail retained",
+        },
+      ],
+    });
+    expect(mapped).toMatchObject({
+      legacy: false,
+      evidenceIssues: [
+        {
+          code: "OCR_CONFIDENCE_LOW",
+          message: "technical detail retained",
+        },
+      ],
+      items: [
+        {
+          businessResult: {
+            resume: { companyRaw: "深圳市甲科技有限公司" },
+            social: { companyRaw: "甲科技" },
+            comparison: { companyMatch: "FUZZY_CANDIDATE" },
+          },
+        },
       ],
     });
   });
