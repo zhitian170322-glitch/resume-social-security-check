@@ -423,6 +423,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
     const result = parseSocialSecurityTable({
       ocr: input,
       sourceFile: "Candidate-03-jiangsu.pdf",
+      documentId: "candidate-03-jiangsu",
     });
 
     expect(result.records).toMatchObject([
@@ -466,6 +467,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
     const result = parseSocialSecurityTable({
       ocr: input,
       sourceFile: "Candidate-03-hubei.pdf",
+      documentId: "candidate-03-hubei",
     });
 
     expect(result.autoVerifiable).toBe(true);
@@ -505,6 +507,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
     const result = parseSocialSecurityTable({
       ocr: input,
       sourceFile: "Candidate-02-guangdong.pdf",
+      documentId: "candidate-02-guangdong",
     });
 
     expect(result.records).toMatchObject([
