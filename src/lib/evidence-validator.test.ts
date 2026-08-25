@@ -5,7 +5,10 @@ import {
   validateResumeEvidence,
   validateSocialSecurityRawRecords,
 } from "./evidence-validator";
-import { buildSocialSecurityCellEvidence } from "./social-security-evidence";
+import {
+  buildSocialSecurityCellEvidence,
+  derivePaidMonthFacts,
+} from "./social-security-evidence";
 import { ShenzhenSocialSecurityParser } from "./social-security-parsers";
 import type {
   SocialSecurityOCRCell,
@@ -296,13 +299,8 @@ describe("[synthetic] Evidence Validator", () => {
     const fixture = syntheticShenzhenFixture();
     fixture.record.paidMonths = null;
     fixture.record.monthlyRecords = [];
-    fixture.record.derived = {
-      startMonth: null,
-      endMonth: null,
-      paidMonthCount: null,
-      gapMonths: [],
-      periods: [],
-    };
+    fixture.record.paidMonthEvidence = [];
+    fixture.record.derived = derivePaidMonthFacts(null);
     const validated = validateSocialSecurityRawRecords(
       [fixture.record],
       fixture.cellEvidence,

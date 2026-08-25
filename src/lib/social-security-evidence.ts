@@ -14,7 +14,10 @@ export interface BoundingBox {
 }
 
 export interface ValueTransformation {
-  type: "CONTROLLED_NUMERIC_OCR_CORRECTION" | "DATE_FORMAT_NORMALIZATION";
+  type:
+    | "CONTROLLED_NUMERIC_OCR_CORRECTION"
+    | "DATE_SUBSTRING_EXTRACTION"
+    | "DATE_FORMAT_NORMALIZATION";
   from: string;
   to: string;
 }
@@ -58,6 +61,24 @@ export interface SocialSecurityMonthlyRecord {
   evidenceIds: string[];
 }
 
+export interface SocialSecurityIntervalEvidence {
+  semantics: "EXPLICIT_CONTINUOUS_INTERVAL";
+  startMonth: EvidenceReference<string>;
+  endMonth: EvidenceReference<string>;
+  continuityEvidenceIds: string[];
+}
+
+export interface SocialSecurityPaidMonthEvidence {
+  month: string;
+  status: "EXTRACTED" | "DERIVED_FROM_VALIDATED_INTERVAL";
+  evidenceIds: string[];
+  derivedFrom: {
+    startMonth: EvidenceReference<string>;
+    endMonth: EvidenceReference<string>;
+    continuityEvidenceIds: string[];
+  } | null;
+}
+
 export interface SocialSecurityDerivedPeriod {
   startMonth: string;
   endMonth: string;
@@ -70,8 +91,11 @@ export interface SocialSecurityRawRecord {
   unitCode: EvidenceReference<string> | null;
   monthlyRecords: SocialSecurityMonthlyRecord[];
   paidMonths: string[] | null;
+  paidMonthEvidence: SocialSecurityPaidMonthEvidence[];
   rawPeriod: EvidenceReference<string> | null;
+  intervalEvidence: SocialSecurityIntervalEvidence | null;
   derivedPaidMonths: string[] | null;
+  statedPaidMonthCount: EvidenceReference<number> | null;
   pensionMonths: EvidenceReference<number> | null;
   medicalMonths: EvidenceReference<number> | null;
   injuryMonths: EvidenceReference<number> | null;
@@ -81,6 +105,13 @@ export interface SocialSecurityRawRecord {
     startMonth: string | null;
     endMonth: string | null;
     paidMonthCount: number | null;
+    derivedPaidMonthCount: number | null;
+    statedPaidMonthCount: number | null;
+    paidYears: number | null;
+    paidRemainingMonths: number | null;
+    paidDuration: string | null;
+    timeSpanMonths: number | null;
+    monthCountCrosscheck: "PASS" | "MISMATCH" | "NOT_STATED";
     gapMonths: string[];
     periods: SocialSecurityDerivedPeriod[];
   };
@@ -89,24 +120,46 @@ export interface SocialSecurityRawRecord {
   warnings: string[];
 }
 
-function monthIndex(value: string) {
+export function monthIndex(value: string) {
   const [year, month] = value.split("-").map(Number);
   return year * 12 + month - 1;
 }
 
-function monthFromIndex(value: number) {
+export function monthFromIndex(value: number) {
   const year = Math.floor(value / 12);
   return `${year}-${String((value % 12) + 1).padStart(2, "0")}`;
 }
 
+export function inclusiveMonthRange(startMonth: string, endMonth: string) {
+  if (monthIndex(endMonth) < monthIndex(startMonth)) return [];
+  const months: string[] = [];
+  for (
+    let index = monthIndex(startMonth);
+    index <= monthIndex(endMonth);
+    index += 1
+  ) {
+    months.push(monthFromIndex(index));
+  }
+  return months;
+}
+
 export function derivePaidMonthFacts(
   paidMonths: string[] | null,
+  statedPaidMonthCount: number | null = null,
 ): SocialSecurityRawRecord["derived"] {
   if (!paidMonths?.length) {
     return {
       startMonth: null,
       endMonth: null,
       paidMonthCount: null,
+      derivedPaidMonthCount: null,
+      statedPaidMonthCount,
+      paidYears: null,
+      paidRemainingMonths: null,
+      paidDuration: null,
+      timeSpanMonths: null,
+      monthCountCrosscheck:
+        statedPaidMonthCount === null ? "NOT_STATED" : "MISMATCH",
       gapMonths: [],
       periods: [],
     };
@@ -145,6 +198,19 @@ export function derivePaidMonthFacts(
     startMonth: sorted[0],
     endMonth: sorted.at(-1)!,
     paidMonthCount: sorted.length,
+    derivedPaidMonthCount: sorted.length,
+    statedPaidMonthCount,
+    paidYears: Math.floor(sorted.length / 12),
+    paidRemainingMonths: sorted.length % 12,
+    paidDuration: `${Math.floor(sorted.length / 12)}年${sorted.length % 12}个月`,
+    timeSpanMonths:
+      monthIndex(sorted.at(-1)!) - monthIndex(sorted[0]) + 1,
+    monthCountCrosscheck:
+      statedPaidMonthCount === null
+        ? "NOT_STATED"
+        : statedPaidMonthCount === sorted.length
+          ? "PASS"
+          : "MISMATCH",
     gapMonths,
     periods,
   };

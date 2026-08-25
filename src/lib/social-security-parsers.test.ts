@@ -10,8 +10,13 @@ import {
   buildSocialSecurityCellEvidence,
 } from "./social-security-evidence";
 import {
+  validateSocialEvidence,
   validateSocialSecurityRawRecords,
 } from "./evidence-validator";
+import type {
+  DocumentPage,
+  SocialSecurityEvidenceRecord,
+} from "./schemas";
 import {
   decodeAliyunRecognizeTableOcrResponse,
   type SocialSecurityOCRCell,
@@ -493,7 +498,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
     });
   });
 
-  it("deterministically expands Guangdong-style explicit periods without inventing gaps", () => {
+  it("does not expand Guangdong-style endpoints without explicit continuity semantics", () => {
     const input = ocr("参保起止时间 单位 养老 工伤 失业", [
       table("guangdong-layout", [
         cell("参保起止时间", 0, 0),
@@ -515,7 +520,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
         companyRaw: "匿名人力资源有限公司",
         startMonth: "2022-12",
         endMonth: "2023-02",
-        paidMonths: ["2022-12", "2023-01", "2023-02"],
+        paidMonths: null,
       },
     ]);
     expect(result).toMatchObject({
@@ -523,8 +528,9 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
       autoVerifiable: false,
     });
     expect(result.rawRecords[0]).toMatchObject({
-      derivedPaidMonths: ["2022-12", "2023-01", "2023-02"],
-      status: "UNCERTAIN",
+      derivedPaidMonths: null,
+      intervalEvidence: null,
+      status: "MANUAL_REVIEW_REQUIRED",
     });
     const validation = validateSocialSecurityRawRecords(
       result.rawRecords,
@@ -532,5 +538,254 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
     );
     expect(validation.automaticEligible).toBe(false);
     expect(validation.validationStatus).not.toBe("VALIDATED");
+  });
+});
+
+describe("continuous interval derived evidence", () => {
+  function continuousIntervalInput(statedMonths = 29) {
+    return ocr("连续缴费区间 2022-12 ～ 2025-04 累计29个月", [
+      table("continuous-interval", [
+        cell("连续缴费区间", 0, 0, 0.97),
+        cell("单位名称", 0, 2, 0.97),
+        cell("累计缴费月数", 0, 3, 0.97),
+        cell("2022-12 ～ 2025-04", 1, 0, 0.97),
+        cell("原文科技有限公司", 1, 2, 0.97),
+        cell(`累计${statedMonths}个月`, 1, 3, 0.97),
+      ]),
+    ]);
+  }
+
+  it("expands a validated continuous interval into 29 lineage-backed months", () => {
+    const input = continuousIntervalInput();
+    const documentId = "continuous-29";
+    const evidence = buildSocialSecurityCellEvidence(documentId, input);
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "continuous.pdf",
+      documentId,
+      cellEvidence: evidence,
+    });
+    const record = result.rawRecords[0];
+    const validation = validateSocialSecurityRawRecords(
+      result.rawRecords,
+      evidence,
+    );
+
+    expect(result).toMatchObject({
+      status: "parsed",
+      autoVerifiable: true,
+      records: [
+        {
+          companyRaw: "原文科技有限公司",
+          startMonth: "2022-12",
+          endMonth: "2025-04",
+        },
+      ],
+    });
+    expect(record.paidMonths).toHaveLength(29);
+    expect(record.paidMonths).toEqual([
+      "2022-12",
+      "2023-01",
+      "2023-02",
+      "2023-03",
+      "2023-04",
+      "2023-05",
+      "2023-06",
+      "2023-07",
+      "2023-08",
+      "2023-09",
+      "2023-10",
+      "2023-11",
+      "2023-12",
+      "2024-01",
+      "2024-02",
+      "2024-03",
+      "2024-04",
+      "2024-05",
+      "2024-06",
+      "2024-07",
+      "2024-08",
+      "2024-09",
+      "2024-10",
+      "2024-11",
+      "2024-12",
+      "2025-01",
+      "2025-02",
+      "2025-03",
+      "2025-04",
+    ]);
+    expect(record.derived).toMatchObject({
+      paidMonthCount: 29,
+      derivedPaidMonthCount: 29,
+      statedPaidMonthCount: 29,
+      paidYears: 2,
+      paidRemainingMonths: 5,
+      paidDuration: "2年5个月",
+      timeSpanMonths: 29,
+      monthCountCrosscheck: "PASS",
+      gapMonths: [],
+    });
+    expect(record.paidMonthEvidence).toHaveLength(29);
+    expect(record.paidMonthEvidence[1]).toMatchObject({
+      month: "2023-01",
+      status: "DERIVED_FROM_VALIDATED_INTERVAL",
+      evidenceIds: [],
+      derivedFrom: {
+        startMonth: { value: "2022-12", evidenceIds: [expect.any(String)] },
+        endMonth: { value: "2025-04", evidenceIds: [expect.any(String)] },
+        continuityEvidenceIds: [expect.any(String)],
+      },
+    });
+    expect(record.monthlyRecords).toEqual([]);
+    expect(record.companyRaw).toMatchObject({
+      rawValue: "原文科技有限公司",
+      value: "原文科技有限公司",
+      transformations: [],
+    });
+    expect(validation).toMatchObject({
+      validationStatus: "VALIDATED",
+      automaticEligible: true,
+      issues: [],
+    });
+
+    const source = result.records[0].source;
+    const fieldBase = {
+      status: "verified" as const,
+      sourceFile: source.file,
+      sourcePage: source.page,
+      sourceQuote: source.quote,
+      extractionMethod: "table_ocr" as const,
+      confidence: source.confidence!,
+    };
+    const converted: SocialSecurityEvidenceRecord = {
+      companyRaw: { ...fieldBase, value: "原文科技有限公司" },
+      companyNormalized: "原文科技有限公司",
+      startMonth: { ...fieldBase, value: "2022-12" },
+      endMonth: { ...fieldBase, value: "2025-04" },
+      paidMonths: { ...fieldBase, value: record.paidMonths },
+      pensionMonths: { ...fieldBase, value: 29 },
+      injuryMonths: { ...fieldBase, value: 29 },
+      unemploymentMonths: { ...fieldBase, value: 29 },
+      personalInsurance: false,
+      sourceFile: source.file,
+      sourcePage: source.page,
+      sourceEvidence: [source.quote],
+      template: "generic",
+      warnings: [],
+    };
+    const documentPage: DocumentPage = {
+      page: source.page,
+      sourceFile: source.file,
+      pdfText: null,
+      ocrText: source.quote,
+      selectedText: source.quote,
+      extractionMethod: "ocr",
+      qualityScore: 97,
+      ocrConfidence: 0.97,
+      warnings: [],
+    };
+    expect(validateSocialEvidence([converted], [documentPage])).toMatchObject({
+      validationStatus: "VALIDATED",
+      automaticEligible: true,
+      issues: [],
+    });
+  });
+
+  it("requires manual review when stated and derived month counts differ", () => {
+    const input = continuousIntervalInput(28);
+    const documentId = "continuous-count-mismatch";
+    const evidence = buildSocialSecurityCellEvidence(documentId, input);
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "count-mismatch.pdf",
+      documentId,
+      cellEvidence: evidence,
+    });
+    const validation = validateSocialSecurityRawRecords(
+      result.rawRecords,
+      evidence,
+    );
+
+    expect(result.rawRecords[0]).toMatchObject({
+      status: "MANUAL_REVIEW_REQUIRED",
+      warnings: ["MONTH_COUNT_MISMATCH"],
+      derived: {
+        paidMonthCount: 29,
+        statedPaidMonthCount: 28,
+        monthCountCrosscheck: "MISMATCH",
+      },
+    });
+    expect(validation.automaticEligible).toBe(false);
+    expect(validation.issues).toContainEqual(
+      expect.objectContaining({
+        code: "DERIVATION_MISMATCH",
+        field: "records.0.statedPaidMonthCount",
+      }),
+    );
+  });
+
+  it("does not create derived months without both endpoint evidence references", () => {
+    const input = continuousIntervalInput();
+    const documentId = "continuous-missing-start";
+    const evidence = buildSocialSecurityCellEvidence(documentId, input).filter(
+      (entry) => !entry.rawValue.includes("2022-12"),
+    );
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "missing-start.pdf",
+      documentId,
+      cellEvidence: evidence,
+    });
+
+    expect(result.rawRecords[0]).toMatchObject({
+      paidMonths: null,
+      derivedPaidMonths: null,
+      paidMonthEvidence: [],
+      intervalEvidence: null,
+      status: "MANUAL_REVIEW_REQUIRED",
+    });
+    expect(result.autoVerifiable).toBe(false);
+  });
+
+  it("keeps same-month companies separate and marks the global overlap", () => {
+    const input = ocr("缴费月份 单位名称", [
+      table("same-month-companies", [
+        cell("缴费月份", 0, 0),
+        cell("单位名称", 0, 1),
+        cell("2023-01", 1, 0),
+        cell("A科技有限公司", 1, 1),
+        cell("2023-01", 2, 0),
+        cell("B服务有限公司", 2, 1),
+      ]),
+    ]);
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "same-month.pdf",
+      documentId: "same-month-companies",
+    });
+
+    expect(result.sameMonthMultiCompany).toBe(true);
+    expect(result.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          companyRaw: "A科技有限公司",
+          paidMonths: ["2023-01"],
+        }),
+        expect.objectContaining({
+          companyRaw: "B服务有限公司",
+          paidMonths: ["2023-01"],
+        }),
+      ]),
+    );
+    expect(result.rawRecords).toHaveLength(2);
+    expect(
+      result.rawRecords.every((record) =>
+        record.paidMonthEvidence.every(
+          (month) =>
+            month.status === "EXTRACTED" &&
+            month.evidenceIds.length === 1,
+        ),
+      ),
+    ).toBe(true);
   });
 });

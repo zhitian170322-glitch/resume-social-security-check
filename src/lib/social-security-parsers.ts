@@ -6,8 +6,11 @@ import {
 import {
   buildSocialSecurityCellEvidence,
   derivePaidMonthFacts,
+  inclusiveMonthRange,
+  monthIndex,
   type EvidenceReference,
   type SocialSecurityCellEvidence,
+  type SocialSecurityIntervalEvidence,
   type SocialSecurityMonthlyRecord,
   type SocialSecurityRawRecord,
   type ValueTransformation,
@@ -55,6 +58,7 @@ export interface SocialSecurityParseResult {
   records: ParsedSocialSecurityRecord[];
   rawRecords: SocialSecurityRawRecord[];
   reasons: string[];
+  sameMonthMultiCompany?: boolean;
 }
 
 export interface SocialSecurityParserInput {
@@ -169,11 +173,6 @@ export function parseOCRMonthWithTransformations(value: string): {
           ]),
     ],
   };
-}
-
-function monthIndex(value: string): number {
-  const [year, month] = value.split("-").map(Number);
-  return year * 12 + month - 1;
 }
 
 function rows(ocr: SocialSecurityOCRResult): TableRow[] {
@@ -614,8 +613,16 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
         ),
         monthlyRecords,
         paidMonths,
+        paidMonthEvidence: monthlyRecords.map((monthly) => ({
+          month: monthly.month.value!,
+          status: "EXTRACTED",
+          evidenceIds: [...monthly.month.evidenceIds],
+          derivedFrom: null,
+        })),
         rawPeriod: null,
+        intervalEvidence: null,
         derivedPaidMonths: null,
+        statedPaidMonthCount: null,
         pensionMonths: null,
         medicalMonths: null,
         injuryMonths: null,
@@ -757,6 +764,7 @@ export class GuangdongSocialSecurityParser implements SocialSecurityTableParser 
           unitCode: null,
           monthlyRecords: [],
           paidMonths: null,
+          paidMonthEvidence: [],
           rawPeriod: {
             rawValue: rawPeriod,
             value: `${startMonth}/${endMonth}`,
@@ -766,7 +774,9 @@ export class GuangdongSocialSecurityParser implements SocialSecurityTableParser 
               ...end.transformations,
             ],
           },
+          intervalEvidence: null,
           derivedPaidMonths: null,
+          statedPaidMonthCount: null,
           pensionMonths: reference(
             pensionCell?.rawText ?? null,
             pensionMonths,
@@ -859,24 +869,9 @@ interface GenericCompanyFact {
   companyRow: TableRow;
   months: GenericMonthFact[];
   period: EvidenceReference<string> | null;
+  intervalEvidence: SocialSecurityIntervalEvidence | null;
+  statedPaidMonthCount: EvidenceReference<number> | null;
   requiresManualReview: boolean;
-}
-
-function monthFromIndex(value: number) {
-  const year = Math.floor(value / 12);
-  return `${year}-${String((value % 12) + 1).padStart(2, "0")}`;
-}
-
-function inclusiveMonthRange(start: string, end: string) {
-  const values: string[] = [];
-  for (
-    let index = monthIndex(start);
-    index <= monthIndex(end);
-    index += 1
-  ) {
-    values.push(monthFromIndex(index));
-  }
-  return values;
 }
 
 function companyCandidate(cell: SocialSecurityOCRCell) {
@@ -895,7 +890,8 @@ function companyCandidate(cell: SocialSecurityOCRCell) {
 function fullMonthFacts(row: TableRow): GenericMonthFact[] {
   const result: GenericMonthFact[] = [];
   for (const cell of row.cells) {
-    const corrected = correctedNumericText(cell.rawText);
+    const correction = controlledNumericCorrection(cell.rawText);
+    const corrected = correction.value;
     const matches = [
       ...corrected.matchAll(
         /(?:^|[^\d])((?:19|20)\d{2})\s*(?:年|[-/.])?\s*(0?[1-9]|1[0-2])\s*(?:月)?(?=[^\d]|$)/gu,
@@ -905,15 +901,26 @@ function fullMonthFacts(row: TableRow): GenericMonthFact[] {
       const rawMatch = match[0].trim().replace(/^[^\d]+|[^\d月]+$/gu, "");
       const parsed = parseOCRMonthWithTransformations(rawMatch);
       if (!parsed.value) continue;
+      const substringTransformations: ValueTransformation[] =
+        corrected.trim() === rawMatch
+          ? []
+          : [
+              {
+                type: "DATE_SUBSTRING_EXTRACTION",
+                from: corrected,
+                to: rawMatch,
+              },
+            ];
       result.push({
         value: parsed.value,
         cell,
         row,
         confidence: cell.confidence,
-        transformations:
-          corrected.trim() === rawMatch
-            ? parsed.transformations
-            : [],
+        transformations: [
+          ...correction.transformations,
+          ...substringTransformations,
+          ...parsed.transformations,
+        ],
         explicit: true,
       });
     }
@@ -952,6 +959,49 @@ function nearestCompany(
   )[0];
 }
 
+function intervalLayoutCells(allRows: TableRow[], row: TableRow) {
+  return allRows
+    .filter(
+      (candidate) =>
+        candidate.tableIndex === row.tableIndex &&
+        candidate.index <= row.index,
+    )
+    .flatMap((candidate) => candidate.cells)
+    .filter((cell) =>
+      /起止|开始.*结束|起始.*终止|连续(?:缴费|缴纳|参保)|缴费(?:期间|区间)/u.test(
+        cell.rawText,
+      ),
+    );
+}
+
+function explicitContinuityCells(allRows: TableRow[], row: TableRow) {
+  return intervalLayoutCells(allRows, row).filter((cell) =>
+    /连续(?:缴费|缴纳|参保)/u.test(cell.rawText),
+  );
+}
+
+function statedPaidMonthCount(
+  row: TableRow,
+  evidence: SocialSecurityCellEvidence[],
+): EvidenceReference<number> | null {
+  for (const cell of row.cells) {
+    const corrected = controlledNumericCorrection(cell.rawText);
+    const match = corrected.value.match(
+      /(?:累计|缴费月数|累计月数)\D*(\d+)\s*(?:个?月)?/u,
+    );
+    if (!match) continue;
+    const value = Number(match[1]);
+    if (!Number.isSafeInteger(value) || value < 0) continue;
+    return reference(
+      cell.rawText,
+      value,
+      cellEvidence(evidence, row, cell),
+      corrected.transformations,
+    );
+  }
+  return null;
+}
+
 function collectGenericFacts(
   tableRows: TableRow[],
   evidence: SocialSecurityCellEvidence[],
@@ -962,7 +1012,12 @@ function collectGenericFacts(
     const months = fullMonthFacts(row);
     if (!companies.length || !months.length) continue;
 
-    if (companies.length === 1 && months.length >= 2) {
+    const intervalCells = intervalLayoutCells(tableRows, row);
+    if (
+      companies.length === 1 &&
+      months.length >= 2 &&
+      intervalCells.length
+    ) {
       const start = months[0];
       const end = months.at(-1)!;
       if (monthIndex(end.value) < monthIndex(start.value)) continue;
@@ -974,23 +1029,56 @@ function collectGenericFacts(
         startEvidence?.id,
         endEvidence?.id,
       ].filter((value): value is string => Boolean(value));
-      const expanded = inclusiveMonthRange(start.value, end.value).map(
-        (value) => ({
-          value,
-          cell: value === end.value ? end.cell : start.cell,
-          row,
-          confidence:
-            start.confidence === null || end.confidence === null
-              ? null
-              : Math.min(start.confidence, end.confidence),
-          transformations: value === start.value
+      const continuityEvidenceIds = explicitContinuityCells(tableRows, row)
+        .map((cell) => {
+          const sourceRow = tableRows.find(
+            (candidate) =>
+              candidate.tableIndex === row.tableIndex &&
+              candidate.cells.includes(cell),
+          );
+          return sourceRow
+            ? cellEvidence(evidence, sourceRow, cell)?.id
+            : undefined;
+        })
+        .filter((value): value is string => Boolean(value));
+      const intervalEvidence =
+        startEvidence && endEvidence && continuityEvidenceIds.length
+          ? {
+              semantics: "EXPLICIT_CONTINUOUS_INTERVAL" as const,
+              startMonth: reference(
+                start.cell.rawText,
+                start.value,
+                startEvidence,
+                start.transformations,
+              ),
+              endMonth: reference(
+                end.cell.rawText,
+                end.value,
+                endEvidence,
+                end.transformations,
+              ),
+              continuityEvidenceIds,
+            }
+          : null;
+      const expanded = (intervalEvidence
+        ? inclusiveMonthRange(start.value, end.value)
+        : [start.value, end.value]
+      ).map((value) => ({
+        value,
+        cell: value === end.value ? end.cell : start.cell,
+        row,
+        confidence:
+          start.confidence === null || end.confidence === null
+            ? null
+            : Math.min(start.confidence, end.confidence),
+        transformations:
+          value === start.value
             ? start.transformations
             : value === end.value
               ? end.transformations
               : [],
-          explicit: value === start.value || value === end.value,
-        }),
-      );
+        explicit: value === start.value || value === end.value,
+      }));
       const current = grouped.get(companyKey);
       grouped.set(companyKey, {
         companyCell: current?.companyCell ?? company,
@@ -1005,9 +1093,18 @@ function collectGenericFacts(
             ...end.transformations,
           ],
         },
-        // Expanded interior months are deterministic derived facts, but the
-        // current Evidence Gate requires every paid month in the source quote.
-        requiresManualReview: true,
+        intervalEvidence:
+          current?.intervalEvidence || current?.period
+            ? null
+            : intervalEvidence,
+        statedPaidMonthCount:
+          statedPaidMonthCount(row, evidence) ??
+          current?.statedPaidMonthCount ??
+          null,
+        requiresManualReview:
+          Boolean(current?.requiresManualReview) ||
+          Boolean(current?.period) ||
+          intervalEvidence === null,
       });
       continue;
     }
@@ -1022,6 +1119,8 @@ function collectGenericFacts(
         companyRow: current?.companyRow ?? row,
         months: [...(current?.months ?? []), month],
         period: current?.period ?? null,
+        intervalEvidence: current?.intervalEvidence ?? null,
+        statedPaidMonthCount: current?.statedPaidMonthCount ?? null,
         requiresManualReview:
           Boolean(current?.requiresManualReview) || !month.explicit,
       });
@@ -1054,11 +1153,20 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
     const rawRecords: SocialSecurityRawRecord[] = [];
     const facts = collectGenericFacts(rows(unpacked.ocr), evidence);
     for (const fact of facts) {
-      const paidMonths = [...new Set(fact.months.map((month) => month.value))].sort(
-        (left, right) => monthIndex(left) - monthIndex(right),
-      );
-      if (!paidMonths.length) continue;
-      const derived = derivePaidMonthFacts(paidMonths);
+      const candidateMonths = [
+        ...new Set(fact.months.map((month) => month.value)),
+      ].sort((left, right) => monthIndex(left) - monthIndex(right));
+      if (!candidateMonths.length) continue;
+      const paidMonths = fact.period
+        ? fact.intervalEvidence
+          ? inclusiveMonthRange(
+              fact.intervalEvidence.startMonth.value!,
+              fact.intervalEvidence.endMonth.value!,
+            )
+          : null
+        : candidateMonths;
+      const statedCount = fact.statedPaidMonthCount?.value ?? null;
+      const derived = derivePaidMonthFacts(paidMonths, statedCount);
       const sourceRows = [...new Set(fact.months.map((month) => month.row))];
       const confidenceValues = [
         fact.companyCell.confidence,
@@ -1072,7 +1180,9 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
         fact.companyRow,
         fact.companyCell,
       );
-      const monthlyRecords: SocialSecurityMonthlyRecord[] = fact.months
+      const monthlyRecords: SocialSecurityMonthlyRecord[] = fact.period
+        ? []
+        : fact.months
         .filter((month) => month.explicit)
         .map((month) => {
           const monthEvidence = cellEvidence(
@@ -1103,10 +1213,37 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
             ),
           };
         });
+      const paidMonthEvidence = fact.intervalEvidence && paidMonths
+        ? paidMonths.map((month) => ({
+            month,
+            status: "DERIVED_FROM_VALIDATED_INTERVAL" as const,
+            evidenceIds: [],
+            derivedFrom: {
+              startMonth: fact.intervalEvidence!.startMonth,
+              endMonth: fact.intervalEvidence!.endMonth,
+              continuityEvidenceIds: [
+                ...fact.intervalEvidence!.continuityEvidenceIds,
+              ],
+            },
+          }))
+        : monthlyRecords
+            .filter((monthly) => monthly.month.value !== null)
+            .map((monthly) => ({
+              month: monthly.month.value!,
+              status: "EXTRACTED" as const,
+              evidenceIds: [...monthly.month.evidenceIds],
+              derivedFrom: null,
+            }));
       const evidenceIds = [
         companyEvidence?.id,
         ...monthlyRecords.flatMap((record) => record.evidenceIds),
+        ...(fact.period?.evidenceIds ?? []),
+        ...(fact.intervalEvidence?.continuityEvidenceIds ?? []),
+        ...(fact.statedPaidMonthCount?.evidenceIds ?? []),
       ].filter((value): value is string => Boolean(value));
+      const countMismatch = derived.monthCountCrosscheck === "MISMATCH";
+      const requiresManualReview =
+        fact.requiresManualReview || paidMonths === null || countMismatch;
       const rawRecord: SocialSecurityRawRecord = {
         companyRaw: reference(
           fact.companyCell.rawText,
@@ -1117,8 +1254,11 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
         unitCode: null,
         monthlyRecords,
         paidMonths,
+        paidMonthEvidence,
         rawPeriod: fact.period,
-        derivedPaidMonths: fact.period ? paidMonths : null,
+        intervalEvidence: fact.intervalEvidence,
+        derivedPaidMonths: fact.intervalEvidence ? paidMonths : null,
+        statedPaidMonthCount: fact.statedPaidMonthCount,
         pensionMonths: null,
         medicalMonths: null,
         injuryMonths: null,
@@ -1126,17 +1266,29 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
         maternityMonths: null,
         derived,
         evidenceIds,
-        status: fact.requiresManualReview ? "UNCERTAIN" : "PARSED",
-        warnings: fact.requiresManualReview
-          ? ["GENERIC_STRUCTURE_REQUIRES_REVIEW"]
-          : [],
+        status: requiresManualReview ? "MANUAL_REVIEW_REQUIRED" : "PARSED",
+        warnings: [
+          ...(fact.period && !fact.intervalEvidence
+            ? ["CONTINUOUS_INTERVAL_UNVALIDATED"]
+            : []),
+          ...(countMismatch ? ["MONTH_COUNT_MISMATCH"] : []),
+        ],
       };
       rawRecords.push(rawRecord);
+      const baseSource = combinedSource(
+        unpacked.sourceFile,
+        [fact.companyRow, ...sourceRows],
+      );
+      const continuityQuotes = (
+        fact.intervalEvidence?.continuityEvidenceIds ?? []
+      )
+        .map((id) => evidence.find((entry) => entry.id === id)?.rawValue)
+        .filter((value): value is string => Boolean(value));
       parsedRecords.push({
         companyRaw: fact.companyCell.rawText,
         companyNormalized: normalizeCompanyName(fact.companyCell.rawText),
-        startMonth: derived.startMonth!,
-        endMonth: derived.endMonth!,
+        startMonth: derived.startMonth ?? candidateMonths[0],
+        endMonth: derived.endMonth ?? candidateMonths.at(-1)!,
         paidMonths,
         pensionMonths: null,
         injuryMonths: null,
@@ -1145,31 +1297,49 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
           company: fact.companyCell.confidence,
           startMonth: minimumConfidence,
           endMonth: minimumConfidence,
-          paidMonths: fact.requiresManualReview ? null : minimumConfidence,
+          paidMonths: requiresManualReview ? null : minimumConfidence,
           pensionMonths: null,
           injuryMonths: null,
           unemploymentMonths: null,
         },
-        source: combinedSource(
-          unpacked.sourceFile,
-          [fact.companyRow, ...sourceRows],
-        ),
+        source: {
+          ...baseSource,
+          quote: [...continuityQuotes, baseSource.quote].join("\n"),
+        },
         rawRecord,
       });
     }
     const autoVerifiable =
       parsedRecords.length > 0 &&
       rawRecords.every((record) => record.status === "PARSED");
+    const companiesByMonth = new Map<string, Set<string>>();
+    for (const record of rawRecords) {
+      for (const month of record.paidMonths ?? []) {
+        const companies = companiesByMonth.get(month) ?? new Set<string>();
+        if (record.companyRaw.value) companies.add(record.companyRaw.value);
+        companiesByMonth.set(month, companies);
+      }
+    }
+    const sameMonthMultiCompany = [...companiesByMonth.values()].some(
+      (companies) => companies.size > 1,
+    );
     return {
       template: detected,
       status: autoVerifiable ? "parsed" : "manual-required",
       autoVerifiable,
       records: parsedRecords,
       rawRecords,
+      sameMonthMultiCompany,
       reasons: parsedRecords.length
         ? [
             `TEMPLATE_HINT:${detected}`,
-            ...(autoVerifiable ? [] : ["GENERIC_STRUCTURE_REQUIRES_REVIEW"]),
+            ...(autoVerifiable
+              ? []
+              : [
+                  ...new Set(
+                    rawRecords.flatMap((record) => record.warnings),
+                  ),
+                ]),
           ]
         : ["PARSER_FAILED", `TEMPLATE_HINT:${detected}`],
     };

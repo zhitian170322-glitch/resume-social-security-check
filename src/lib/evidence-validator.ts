@@ -11,6 +11,7 @@ import {
 import { config } from "./config";
 import {
   derivePaidMonthFacts,
+  inclusiveMonthRange,
   type EvidenceReference,
   type SocialSecurityCellEvidence,
   type SocialSecurityRawRecord,
@@ -414,6 +415,52 @@ function validateMonthsEvidence(
   return issues;
 }
 
+function validateSocialPaidMonthsEvidence(
+  pages: DocumentPage[],
+  record: SocialSecurityEvidenceRecord,
+  fieldName: string,
+): EvidenceIssue[] {
+  const continuityExplicit =
+    /连续(?:缴费|缴纳|参保)/u.test(
+      record.paidMonths.sourceQuote,
+    );
+  if (!continuityExplicit) {
+    return validateMonthsEvidence(pages, record.paidMonths, fieldName);
+  }
+  const issues = [
+    ...validateFieldGate(pages, record.paidMonths, fieldName),
+    ...validateQuote(pages, record.paidMonths, fieldName),
+  ];
+  const sameSource =
+    record.startMonth.sourceFile === record.paidMonths.sourceFile &&
+    record.endMonth.sourceFile === record.paidMonths.sourceFile &&
+    record.startMonth.sourcePage === record.paidMonths.sourcePage &&
+    record.endMonth.sourcePage === record.paidMonths.sourcePage;
+  const expected =
+    record.startMonth.value && record.endMonth.value
+      ? inclusiveMonthRange(
+          record.startMonth.value,
+          record.endMonth.value,
+        )
+      : [];
+  if (
+    !sameSource ||
+    !expected.length ||
+    record.paidMonths.value === null ||
+    JSON.stringify(record.paidMonths.value) !== JSON.stringify(expected)
+  ) {
+    issues.push({
+      code: "DERIVATION_MISMATCH",
+      field: fieldName,
+      sourceFile: record.paidMonths.sourceFile,
+      sourcePage: record.paidMonths.sourcePage,
+      message:
+        "paidMonths 不是由同一已定位连续区间的 startMonth/endMonth 确定性展开",
+    });
+  }
+  return issues;
+}
+
 export function validateResumeEvidence(
   input: ResumeEvidenceExtraction,
   pages: DocumentPage[],
@@ -494,9 +541,9 @@ export function validateSocialEvidence(
       ...validateCompanyEvidence(pages, record.companyRaw, `records.${index}.company`),
       ...validateMonthEvidence(pages, record.startMonth, `records.${index}.start`),
       ...validateMonthEvidence(pages, record.endMonth, `records.${index}.end`),
-      ...validateMonthsEvidence(
+      ...validateSocialPaidMonthsEvidence(
         pages,
-        record.paidMonths,
+        record,
         `records.${index}.paidMonths`,
       ),
       ...validateNumberEvidence(
@@ -545,6 +592,10 @@ function applyTransformations(
     }
     if (transformation.type === "CONTROLLED_NUMERIC_OCR_CORRECTION") {
       if (controlledNumericCorrection(current) !== transformation.to) {
+        return { value: current, supported: false };
+      }
+    } else if (transformation.type === "DATE_SUBSTRING_EXTRACTION") {
+      if (!current.includes(transformation.to)) {
         return { value: current, supported: false };
       }
     } else if (transformation.type === "DATE_FORMAT_NORMALIZATION") {
@@ -845,6 +896,16 @@ export function validateSocialSecurityRawRecords(
         }),
       );
     }
+    if (record.statedPaidMonthCount) {
+      recordIssues.push(
+        ...validateRawReference({
+          reference: record.statedPaidMonthCount,
+          field: `records.${recordIndex}.statedPaidMonthCount`,
+          documentId,
+          evidence,
+        }),
+      );
+    }
     for (const [name, reference] of [
       ["pensionMonths", record.pensionMonths],
       ["medicalMonths", record.medicalMonths],
@@ -862,7 +923,99 @@ export function validateSocialSecurityRawRecords(
         }),
       );
     }
-    if (record.paidMonths === null) {
+    if (record.intervalEvidence) {
+      const interval = record.intervalEvidence;
+      recordIssues.push(
+        ...validateRawReference({
+          reference: interval.startMonth,
+          field: `records.${recordIndex}.interval.startMonth`,
+          documentId,
+          evidence,
+        }),
+        ...validateRawReference({
+          reference: interval.endMonth,
+          field: `records.${recordIndex}.interval.endMonth`,
+          documentId,
+          evidence,
+        }),
+      );
+      const continuityEvidence = interval.continuityEvidenceIds
+        .map((id) => evidence.get(id))
+        .filter((entry): entry is SocialSecurityCellEvidence => Boolean(entry));
+      if (
+        !interval.continuityEvidenceIds.length ||
+        continuityEvidence.length !== interval.continuityEvidenceIds.length ||
+        continuityEvidence.some(
+          (entry) =>
+            entry.documentId !== documentId ||
+            entry.confidence === null ||
+            entry.confidence < config.OCR_MIN_CONFIDENCE ||
+            !/连续(?:缴费|缴纳|参保)/u.test(entry.rawValue),
+        )
+      ) {
+        recordIssues.push(
+          rawIssue(
+            "CELL_EVIDENCE_MISSING",
+            `records.${recordIndex}.interval.continuity`,
+            documentId,
+            continuityEvidence[0]?.pageNumber ?? 1,
+            "连续缴费区间缺少可验证的语义 Evidence",
+          ),
+        );
+      }
+      const startMonth = interval.startMonth.value;
+      const endMonth = interval.endMonth.value;
+      const expectedPaidMonths =
+        startMonth && endMonth
+          ? inclusiveMonthRange(startMonth, endMonth)
+          : [];
+      if (
+        !expectedPaidMonths.length ||
+        JSON.stringify(record.paidMonths) !==
+          JSON.stringify(expectedPaidMonths) ||
+        JSON.stringify(record.derivedPaidMonths) !==
+          JSON.stringify(expectedPaidMonths)
+      ) {
+        recordIssues.push(
+          rawIssue(
+            "DERIVATION_MISMATCH",
+            `records.${recordIndex}.derivedPaidMonths`,
+            documentId,
+            continuityEvidence[0]?.pageNumber ?? 1,
+            "区间月份不是由已引用的起止月份确定性展开",
+          ),
+        );
+      }
+      const lineageValid =
+        record.paidMonthEvidence.length === expectedPaidMonths.length &&
+        record.paidMonthEvidence.every(
+          (monthEvidence, index) =>
+            monthEvidence.month === expectedPaidMonths[index] &&
+            monthEvidence.status ===
+              "DERIVED_FROM_VALIDATED_INTERVAL" &&
+            monthEvidence.evidenceIds.length === 0 &&
+            monthEvidence.derivedFrom !== null &&
+            JSON.stringify(
+              monthEvidence.derivedFrom.startMonth.evidenceIds,
+            ) === JSON.stringify(interval.startMonth.evidenceIds) &&
+            JSON.stringify(monthEvidence.derivedFrom.endMonth.evidenceIds) ===
+              JSON.stringify(interval.endMonth.evidenceIds) &&
+            JSON.stringify(
+              monthEvidence.derivedFrom.continuityEvidenceIds,
+            ) === JSON.stringify(interval.continuityEvidenceIds),
+        );
+      if (!lineageValid) {
+        recordIssues.push(
+          rawIssue(
+            "DERIVATION_MISMATCH",
+            `records.${recordIndex}.paidMonthEvidence`,
+            documentId,
+            continuityEvidence[0]?.pageNumber ?? 1,
+            "区间派生月份缺少完整的 start/end/continuity Evidence lineage",
+          ),
+        );
+      }
+    } else if (record.paidMonths === null) {
       recordIssues.push(
         rawIssue(
           "MONTH_DETAIL_UNAVAILABLE",
@@ -892,10 +1045,86 @@ export function validateSocialSecurityRawRecords(
           ),
         );
       }
+      const extractedLineageValid =
+        record.paidMonthEvidence.every(
+          (monthEvidence) => {
+            const sourceMonth = record.monthlyRecords.find(
+              (monthly) => monthly.month.value === monthEvidence.month,
+            );
+            return (
+              monthEvidence.status === "EXTRACTED" &&
+              monthEvidence.derivedFrom === null &&
+              monthEvidence.evidenceIds.length > 0 &&
+              sourceMonth !== undefined &&
+              JSON.stringify(monthEvidence.evidenceIds) ===
+                JSON.stringify(sourceMonth.month.evidenceIds)
+            );
+          },
+        ) &&
+        JSON.stringify(
+          [
+            ...new Set(
+              record.paidMonthEvidence.map(
+                (monthEvidence) => monthEvidence.month,
+              ),
+            ),
+          ].sort(),
+        ) === JSON.stringify(paidMonths);
+      if (!extractedLineageValid) {
+        recordIssues.push(
+          rawIssue(
+            "DERIVATION_MISMATCH",
+            `records.${recordIndex}.paidMonthEvidence`,
+            documentId,
+            1,
+            "逐月 paidMonths 必须逐项引用独立 OCR Cell Evidence",
+          ),
+        );
+      }
+    } else {
+      recordIssues.push(
+        rawIssue(
+          "MONTH_DETAIL_UNAVAILABLE",
+          `records.${recordIndex}.paidMonths`,
+          documentId,
+          1,
+          "paidMonths 既无逐月 Cell Evidence，也无已验证连续区间",
+        ),
+      );
+    }
+    if (
+      !record.intervalEvidence &&
+      record.derivedPaidMonths !== null
+    ) {
+      recordIssues.push(
+        rawIssue(
+          "DERIVATION_MISMATCH",
+          `records.${recordIndex}.derivedPaidMonths`,
+          documentId,
+          1,
+          "缺少连续区间 Evidence 时不得生成 derivedPaidMonths",
+        ),
+      );
+    }
+    if (record.derived.monthCountCrosscheck === "MISMATCH") {
+      recordIssues.push(
+        rawIssue(
+          "DERIVATION_MISMATCH",
+          `records.${recordIndex}.statedPaidMonthCount`,
+          documentId,
+          1,
+          "材料声明缴费月数与程序确定性计算结果不一致",
+        ),
+      );
     }
     if (
       JSON.stringify(record.derived) !==
-      JSON.stringify(derivePaidMonthFacts(record.paidMonths))
+      JSON.stringify(
+        derivePaidMonthFacts(
+          record.paidMonths,
+          record.statedPaidMonthCount?.value ?? null,
+        ),
+      )
     ) {
       recordIssues.push(
         rawIssue(
