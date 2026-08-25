@@ -7,6 +7,12 @@ import {
   parseSocialSecurityTable,
 } from "./social-security-parsers";
 import {
+  buildSocialSecurityCellEvidence,
+} from "./social-security-evidence";
+import {
+  validateSocialSecurityRawRecords,
+} from "./evidence-validator";
+import {
   decodeAliyunRecognizeTableOcrResponse,
   type SocialSecurityOCRCell,
   type SocialSecurityOCRResult,
@@ -432,6 +438,11 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
       status: "manual-required",
       autoVerifiable: false,
     });
+    const validation = validateSocialSecurityRawRecords(
+      result.rawRecords,
+      buildSocialSecurityCellEvidence("candidate-03-jiangsu", input),
+    );
+    expect(validation.automaticEligible).toBe(false);
   });
 
   it("extracts Hubei-style left/right monthly columns by nearest company cell", () => {
@@ -470,6 +481,14 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
         }),
       ]),
     );
+    const validation = validateSocialSecurityRawRecords(
+      result.rawRecords,
+      buildSocialSecurityCellEvidence("candidate-03-hubei", input),
+    );
+    expect(validation).toMatchObject({
+      automaticEligible: true,
+      validationStatus: "VALIDATED",
+    });
   });
 
   it("deterministically expands Guangdong-style explicit periods without inventing gaps", () => {
@@ -504,5 +523,11 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
       derivedPaidMonths: ["2022-12", "2023-01", "2023-02"],
       status: "UNCERTAIN",
     });
+    const validation = validateSocialSecurityRawRecords(
+      result.rawRecords,
+      buildSocialSecurityCellEvidence("candidate-02-guangdong", input),
+    );
+    expect(validation.automaticEligible).toBe(false);
+    expect(validation.validationStatus).not.toBe("VALIDATED");
   });
 });
