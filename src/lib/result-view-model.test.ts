@@ -687,7 +687,7 @@ describe("[synthetic] Phase 9 Result UI mapping", () => {
     const issues: EvidenceIssue[] = [
       {
         code: "EXTRACTION_CONFLICT",
-        field: "company",
+        field: "experiences.0.companyRaw",
         sourceFile: "synthetic.pdf",
         sourcePage: 1,
         message: "synthetic conflict",
