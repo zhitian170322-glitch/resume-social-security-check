@@ -15,7 +15,7 @@ import {
 } from "./verification-engine-phase8";
 import type { PipelineArtifactVersions } from "./stage-cache";
 
-export const PARSER_VERSION = "social-security-parser-phase6-v1";
+export const PARSER_VERSION = "social-security-generic-parser-v2";
 export const EVIDENCE_VALIDATOR_VERSION = "evidence-validator-phase7-v1";
 export const VERIFICATION_ENGINE_VERSION = "verification-engine-phase8-v1";
 export const EVIDENCE_PIPELINE_STAGE_ORDER = [
