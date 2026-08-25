@@ -112,6 +112,30 @@ export function extractResume(text: string): Promise<ResumeExtraction> {
   );
 }
 
+const optionalSourceText = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim().length > 0 ? value : null,
+  z.string().nullable(),
+);
+
+const ResumeAIResponseSchema = z
+  .object({
+    candidateName: optionalSourceText.optional().default(null),
+    experiences: z.array(
+      z
+        .object({
+          companyRaw: optionalSourceText.optional().default(null),
+          position: optionalSourceText.optional().default(null),
+          startMonthRaw: optionalSourceText.optional().default(null),
+          endMonthRaw: optionalSourceText.optional().default(null),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+
+type ResumeAIResponse = z.infer<typeof ResumeAIResponseSchema>;
+
 const RAW_MONTH_PATTERN =
   /(?<!\d)\d{4}\s*(?:[.\-/年]\s*|(?=\d{2}(?:\D|$)))(?:0?[1-9]|1[0-2])\s*月?(?!\d)/g;
 const PRESENT_PATTERN = /至今|目前|present/iu;
@@ -124,6 +148,229 @@ function normalizedMonth(raw: string, currentMonth: string) {
       /(?<!\d)(\d{4})\s*(?:[.\-/年]\s*|(?=\d{2}(?:\D|$)))(0?[1-9]|1[0-2])\s*月?(?!\d)/,
     );
   return match ? `${match[1]}-${match[2].padStart(2, "0")}` : null;
+}
+
+function candidateConfidence(
+  page: DocumentPage,
+  sourceMethod: "pdf_text" | "ocr",
+) {
+  return sourceMethod === "pdf_text"
+    ? page.qualityScore / 100
+    : (page.ocrConfidence ?? 0);
+}
+
+function sourceCandidate(
+  page: DocumentPage,
+  rawValue: string,
+  sourceMethod: "pdf_text" | "ocr",
+): ResumeFieldSourceCandidate {
+  return {
+    rawValue,
+    sourceFile: page.sourceFile,
+    sourcePage: page.page,
+    sourceQuote: rawValue,
+    sourceMethod,
+    confidence: candidateConfidence(page, sourceMethod),
+  };
+}
+
+function uniqueCandidates(candidates: ResumeFieldSourceCandidate[]) {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = [
+      candidate.sourceFile,
+      candidate.sourcePage,
+      candidate.sourceMethod,
+      candidate.rawValue,
+    ].join("\u001f");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function exactSourceCandidates(
+  rawValue: string,
+  pages: DocumentPage[],
+): ResumeFieldSourceCandidate[] {
+  const candidates: ResumeFieldSourceCandidate[] = [];
+  for (const page of pages) {
+    if (page.pdfText?.includes(rawValue)) {
+      candidates.push(sourceCandidate(page, rawValue, "pdf_text"));
+    }
+    if (page.ocrText?.includes(rawValue)) {
+      candidates.push(sourceCandidate(page, rawValue, "ocr"));
+    }
+  }
+  return candidates;
+}
+
+type LocatedMonthToken = { rawValue: string; normalizedValue: string };
+
+function monthTokens(text: string | null, currentMonth: string) {
+  if (!text) return [];
+  const tokens: LocatedMonthToken[] = [];
+  for (const match of text.matchAll(RAW_MONTH_PATTERN)) {
+    const normalizedValue = normalizedMonth(match[0], currentMonth);
+    if (normalizedValue) {
+      tokens.push({ rawValue: match[0], normalizedValue });
+    }
+  }
+  for (const match of text.matchAll(/至今|目前|present/giu)) {
+    tokens.push({ rawValue: match[0], normalizedValue: currentMonth });
+  }
+  return tokens;
+}
+
+function monthSourceCandidates(
+  aiRawValue: string,
+  pages: DocumentPage[],
+  currentMonth: string,
+) {
+  const targetMonth = normalizedMonth(aiRawValue, currentMonth);
+  if (!targetMonth) return exactSourceCandidates(aiRawValue, pages);
+  const candidates: ResumeFieldSourceCandidate[] = [];
+  for (const page of pages) {
+    const pdfTokens = monthTokens(page.pdfText, currentMonth);
+    const ocrTokens = monthTokens(page.ocrText, currentMonth);
+    const addMatching = (
+      tokens: LocatedMonthToken[],
+      sourceMethod: "pdf_text" | "ocr",
+    ) => {
+      tokens
+        .filter((token) => token.normalizedValue === targetMonth)
+        .forEach((token) =>
+          candidates.push(
+            sourceCandidate(page, token.rawValue, sourceMethod),
+          ),
+        );
+    };
+    addMatching(pdfTokens, "pdf_text");
+    addMatching(ocrTokens, "ocr");
+
+    const pdfIndex = pdfTokens.findIndex(
+      (token) => token.normalizedValue === targetMonth,
+    );
+    const ocrIndex = ocrTokens.findIndex(
+      (token) => token.normalizedValue === targetMonth,
+    );
+    if (pdfIndex >= 0 && ocrTokens[pdfIndex]) {
+      candidates.push(
+        sourceCandidate(page, ocrTokens[pdfIndex].rawValue, "ocr"),
+      );
+    }
+    if (ocrIndex >= 0 && pdfTokens[ocrIndex]) {
+      candidates.push(
+        sourceCandidate(page, pdfTokens[ocrIndex].rawValue, "pdf_text"),
+      );
+    }
+  }
+  return uniqueCandidates(candidates);
+}
+
+function fallbackEvidenceLocation(pages: DocumentPage[]) {
+  return {
+    sourceFile: pages[0]?.sourceFile ?? "unknown",
+    sourcePage: pages[0]?.page ?? 1,
+  };
+}
+
+function buildStringEvidence(
+  aiRawValue: string | null,
+  pages: DocumentPage[],
+): EvidenceStringField {
+  const fallback = fallbackEvidenceLocation(pages);
+  if (aiRawValue === null) {
+    return {
+      value: null,
+      rawValue: null,
+      normalizedValue: null,
+      status: "missing",
+      ...fallback,
+      sourceQuote: "",
+      extractionMethod: "deepseek",
+      confidence: 0,
+      sourceCandidates: [],
+    };
+  }
+  const candidates = exactSourceCandidates(aiRawValue, pages);
+  const first = candidates[0];
+  return {
+    value: first ? aiRawValue : null,
+    rawValue: aiRawValue,
+    normalizedValue: aiRawValue,
+    status: first ? "verified" : "uncertain",
+    sourceFile: first?.sourceFile ?? fallback.sourceFile,
+    sourcePage: first?.sourcePage ?? fallback.sourcePage,
+    sourceQuote: first?.sourceQuote ?? "",
+    sourceMethod: first?.sourceMethod,
+    extractionMethod: first?.sourceMethod ?? "deepseek",
+    confidence: first?.confidence ?? 0,
+    sourceCandidates: candidates,
+  };
+}
+
+function buildMonthEvidence(
+  aiRawValue: string | null,
+  pages: DocumentPage[],
+  currentMonth: string,
+): EvidenceMonthField {
+  const fallback = fallbackEvidenceLocation(pages);
+  if (aiRawValue === null) {
+    return {
+      value: null,
+      rawValue: null,
+      normalizedValue: null,
+      status: "missing",
+      ...fallback,
+      sourceQuote: "",
+      extractionMethod: "deepseek",
+      confidence: 0,
+      sourceCandidates: [],
+    };
+  }
+  const normalizedValue = normalizedMonth(aiRawValue, currentMonth);
+  const candidates = monthSourceCandidates(aiRawValue, pages, currentMonth);
+  const first = candidates[0];
+  return {
+    value: first ? normalizedValue : null,
+    rawValue: aiRawValue,
+    normalizedValue,
+    status: first && normalizedValue ? "verified" : "uncertain",
+    sourceFile: first?.sourceFile ?? fallback.sourceFile,
+    sourcePage: first?.sourcePage ?? fallback.sourcePage,
+    sourceQuote: first?.sourceQuote ?? "",
+    sourceMethod: first?.sourceMethod,
+    extractionMethod: first?.sourceMethod ?? "deepseek",
+    confidence: first?.confidence ?? 0,
+    sourceCandidates: candidates,
+  };
+}
+
+export function groundResumeAIResponse(
+  input: ResumeAIResponse,
+  pages: DocumentPage[],
+  currentMonth = new Date().toISOString().slice(0, 7),
+): ResumeEvidenceExtraction {
+  const extraction: ResumeEvidenceExtraction = {
+    candidateName: buildStringEvidence(input.candidateName, pages),
+    experiences: input.experiences.map((experience) => ({
+      resumeCompany: buildStringEvidence(experience.companyRaw, pages),
+      position: buildStringEvidence(experience.position, pages),
+      resumeStartMonth: buildMonthEvidence(
+        experience.startMonthRaw,
+        pages,
+        currentMonth,
+      ),
+      resumeEndMonth: buildMonthEvidence(
+        experience.endMonthRaw,
+        pages,
+        currentMonth,
+      ),
+      warnings: [],
+    })),
+  };
+  return selectResumeFieldSources(extraction, pages, currentMonth);
 }
 
 function pageForCandidate(
@@ -359,35 +606,28 @@ export async function extractResumeWithEvidence(
     ocrConfidence: page.ocrConfidence,
   }));
   const extracted = await parseWithRetry(
-    ResumeEvidenceExtractionSchema,
-    `你只能定位简历字段并把字段归组到工作经历，不能创造、推断、纠错或改写事实。
-只输出符合 Schema 的 JSON：
+    ResumeAIResponseSchema,
+    `你只负责从简历原文识别基础字段并把字段归组到工作经历，不能创造、推断、纠错或改写事实。
+只输出以下简单 JSON：
 {
-  "candidateName": EvidenceStringField,
+  "candidateName": "姓名或null",
   "experiences": [{
-    "resumeCompany": EvidenceStringField,
-    "position": EvidenceStringField,
-    "resumeStartMonth": EvidenceMonthField,
-    "resumeEndMonth": EvidenceMonthField,
-    "warnings": []
+    "companyRaw": "公司原文或null",
+    "position": "职位原文或null",
+    "startMonthRaw": "开始年月原文或null",
+    "endMonthRaw": "结束年月原文或null"
   }]
 }
-只提取 candidateName、companyRaw（字段名 resumeCompany）、position、startMonth、endMonth；禁止提取描述、项目、技能、教育、联系方式或其他字段。
-EvidenceField 必须包含 value、rawValue、normalizedValue、status、sourceFile、sourcePage、sourceQuote、sourceMethod、extractionMethod、confidence、sourceCandidates。
-sourceCandidates 必须逐项列出 PDF_TEXT 和 OCR 中实际出现的该字段候选；每项包含 rawValue、sourceFile、sourcePage、sourceQuote、sourceMethod、confidence。
 规则：
-1. candidateName、companyRaw、position 的 rawValue/value 必须是 sourceQuote 中逐字存在的原文；companyRaw 禁止简称、补全、纠错、扩写、合并、品牌替换或标准化。
-2. 月份 rawValue 必须逐字来自原文；normalizedValue/value 只可把 YYYY.MM、YYYY-MM、YYYY/MM、YYYYMM、YYYY年MM月转换为 YYYY-MM。“至今/目前/Present”保留在 rawValue，value 暂为 null，由确定性代码统一处理。
-3. 原文没有 position 或 endMonth 时 value=null、rawValue=null、normalizedValue=null、status="missing"；无法确定时 status="uncertain"。禁止根据职责猜职位，禁止根据工龄或相邻经历补日期。
-4. sourceQuote 必须逐字复制自指定页面，sourceFile/sourcePage 必须对应输入。
-5. 同一经历可以跨页组合；每个字段独立引用自己的页面和原文片段。不得把工作描述结构化。
-6. sourceMethod/extractionMethod 必须为实际原文来源 "pdf_text" 或 "ocr"；confidence 为 0 到 1。不要自行决定最终可信来源，代码会按字段选择。
-7. PDF_TEXT 与 OCR 候选不一致时必须同时保留在 sourceCandidates，禁止静默选择或合并。
-8. 不计算任职月数，不判断公司关系，不判断核验结论。`,
+1. companyRaw、position 和年月字段必须原样复制，禁止补全、纠错、简称、品牌替换或标准化。
+2. 原文没有字段时输出 null；禁止根据职责猜职位，禁止根据工龄或相邻经历补日期。
+3. 同一经历可以跨页组合，但不得输出工作描述、项目、技能、教育、联系方式或其他字段。
+4. 不要输出 Evidence、sourceFile、sourcePage、sourceQuote、sourceMethod、confidence 或 sourceCandidates；这些由程序确定性构建。
+5. 不计算任职月数，不判断公司关系，不判断核验结论。`,
     JSON.stringify(source),
     onCall,
   );
-  return selectResumeFieldSources(extracted, pages);
+  return groundResumeAIResponse(extracted, pages);
 }
 
 export function extractSocialSecurity(
