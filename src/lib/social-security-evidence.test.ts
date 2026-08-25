@@ -18,6 +18,13 @@ describe("social-security cell evidence and paid-month facts", () => {
       startMonth: "2022-08",
       endMonth: "2022-12",
       paidMonthCount: 4,
+      derivedPaidMonthCount: 4,
+      statedPaidMonthCount: null,
+      paidYears: 0,
+      paidRemainingMonths: 4,
+      paidDuration: "0年4个月",
+      timeSpanMonths: 5,
+      monthCountCrosscheck: "NOT_STATED",
       gapMonths: ["2022-11"],
       periods: [
         {
