@@ -1087,7 +1087,7 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
               monthEvidence,
               month.transformations,
             ),
-            unitCode: reference(null, null, null),
+            unitCode: reference<string>(null, null, null),
             companyRaw: reference(
               fact.companyCell.rawText,
               fact.companyCell.rawText,
