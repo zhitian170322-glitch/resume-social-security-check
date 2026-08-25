@@ -211,6 +211,26 @@ describe("[synthetic] Phase 8.5 Worker pipeline integration", () => {
     expect(stored.items[0].evidenceRefs.length).toBeGreaterThan(0);
   });
 
+  it("[synthetic] keeps a social extraction failure scoped away from resume fields", () => {
+    const stage = createEvidenceValidationStage({
+      versions,
+      resumeValidation: validationResult(resumeEvidence()),
+      socialValidation: validationResult(socialEvidence(), "UNSUPPORTED"),
+      upstreamIssues: [
+        {
+          code: "EXTRACTION_UNSUPPORTED",
+          field: "socialSecurityStructure",
+          sourceFile: "social.pdf",
+          sourcePage: 1,
+          message: "社保字段无法定位",
+        },
+      ],
+    });
+
+    expect(stage.resume.validationStatus).toBe("VALIDATED");
+    expect(stage.socialSecurity.validationStatus).toBe("UNSUPPORTED");
+  });
+
   it("[synthetic] B: does not invoke verification for unvalidated resume evidence", () => {
     const verify = vi.fn();
     const result = runIntegratedVerification({

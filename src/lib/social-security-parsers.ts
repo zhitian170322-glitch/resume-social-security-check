@@ -35,6 +35,7 @@ export interface ParsedSocialSecurityRecord {
   startMonth: string;
   endMonth: string;
   paidMonths: string[] | null;
+  statedPaidMonthCount: number | null;
   pensionMonths: number | null;
   injuryMonths: number | null;
   unemploymentMonths: number | null;
@@ -643,6 +644,7 @@ export class ShenzhenSocialSecurityParser implements SocialSecurityTableParser {
         startMonth: rawRecord.derived.startMonth!,
         endMonth: rawRecord.derived.endMonth!,
         paidMonths,
+        statedPaidMonthCount: null,
         pensionMonths: null,
         injuryMonths: null,
         unemploymentMonths: null,
@@ -818,6 +820,7 @@ export class GuangdongSocialSecurityParser implements SocialSecurityTableParser 
           startMonth,
           endMonth,
           paidMonths: null,
+          statedPaidMonthCount: null,
           pensionMonths,
           injuryMonths,
           unemploymentMonths,
@@ -968,23 +971,29 @@ function intervalLayoutCells(allRows: TableRow[], row: TableRow) {
     )
     .flatMap((candidate) => candidate.cells)
     .filter((cell) =>
-      /起止|开始.*结束|起始.*终止|连续(?:缴费|缴纳|参保)|缴费(?:期间|区间)/u.test(
+      /起止|开始.*结束|起始.*终止|缴费(?:期间|区间)/u.test(
         cell.rawText,
       ),
     );
 }
 
-function explicitContinuityCells(allRows: TableRow[], row: TableRow) {
-  return intervalLayoutCells(allRows, row).filter((cell) =>
-    /连续(?:缴费|缴纳|参保)/u.test(cell.rawText),
-  );
-}
-
 function statedPaidMonthCount(
+  tableRows: TableRow[],
   row: TableRow,
   evidence: SocialSecurityCellEvidence[],
 ): EvidenceReference<number> | null {
-  for (const cell of row.cells) {
+  const nearbyRows = tableRows
+    .filter(
+      (candidate) =>
+        candidate.tableIndex === row.tableIndex &&
+        Math.abs(candidate.index - row.index) <= 2,
+    )
+    .sort(
+      (left, right) =>
+        Math.abs(left.index - row.index) - Math.abs(right.index - row.index),
+    );
+  for (const candidateRow of nearbyRows) {
+    for (const cell of candidateRow.cells) {
     const corrected = controlledNumericCorrection(cell.rawText);
     const match = corrected.value.match(
       /(?:累计|缴费月数|累计月数)\D*(\d+)\s*(?:个?月)?/u,
@@ -995,9 +1004,10 @@ function statedPaidMonthCount(
     return reference(
       cell.rawText,
       value,
-      cellEvidence(evidence, row, cell),
+      cellEvidence(evidence, candidateRow, cell),
       corrected.transformations,
     );
+    }
   }
   return null;
 }
@@ -1013,10 +1023,14 @@ function collectGenericFacts(
     if (!companies.length || !months.length) continue;
 
     const intervalCells = intervalLayoutCells(tableRows, row);
+    const statedCount = statedPaidMonthCount(tableRows, row, evidence);
+    const hasRangeNotation = row.cells.some((cell) =>
+      /(?:~|～|至|—|–)/u.test(cell.rawText),
+    );
     if (
       companies.length === 1 &&
       months.length >= 2 &&
-      intervalCells.length
+      (intervalCells.length || statedCount !== null || hasRangeNotation)
     ) {
       const start = months[0];
       const end = months.at(-1)!;
@@ -1029,22 +1043,14 @@ function collectGenericFacts(
         startEvidence?.id,
         endEvidence?.id,
       ].filter((value): value is string => Boolean(value));
-      const continuityEvidenceIds = explicitContinuityCells(tableRows, row)
-        .map((cell) => {
-          const sourceRow = tableRows.find(
-            (candidate) =>
-              candidate.tableIndex === row.tableIndex &&
-              candidate.cells.includes(cell),
-          );
-          return sourceRow
-            ? cellEvidence(evidence, sourceRow, cell)?.id
-            : undefined;
-        })
-        .filter((value): value is string => Boolean(value));
+      const range = inclusiveMonthRange(start.value, end.value);
       const intervalEvidence =
-        startEvidence && endEvidence && continuityEvidenceIds.length
+        startEvidence &&
+        endEvidence &&
+        statedCount?.value !== null &&
+        statedCount?.value === range.length
           ? {
-              semantics: "EXPLICIT_CONTINUOUS_INTERVAL" as const,
+              semantics: "INTERVAL_WITH_STATED_MONTH_COUNT" as const,
               startMonth: reference(
                 start.cell.rawText,
                 start.value,
@@ -1057,7 +1063,7 @@ function collectGenericFacts(
                 endEvidence,
                 end.transformations,
               ),
-              continuityEvidenceIds,
+              statedPaidMonthCount: statedCount,
             }
           : null;
       const expanded = (intervalEvidence
@@ -1097,14 +1103,10 @@ function collectGenericFacts(
           current?.intervalEvidence || current?.period
             ? null
             : intervalEvidence,
-        statedPaidMonthCount:
-          statedPaidMonthCount(row, evidence) ??
-          current?.statedPaidMonthCount ??
-          null,
+        statedPaidMonthCount: statedCount ?? current?.statedPaidMonthCount ?? null,
         requiresManualReview:
           Boolean(current?.requiresManualReview) ||
-          Boolean(current?.period) ||
-          intervalEvidence === null,
+          Boolean(current?.period),
       });
       continue;
     }
@@ -1137,10 +1139,9 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
     sourceFile?: string,
   ): SocialSecurityParseResult {
     const unpacked = unpackInput(input, sourceFile);
-    const detected = new SocialSecurityTemplateDetector().detect(unpacked.ocr);
     if (!tableTopologyValid(unpacked.ocr)) {
       return {
-        template: detected,
+        template: "GENERIC",
         status: "manual-required",
         autoVerifiable: false,
         records: [],
@@ -1166,7 +1167,12 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
           : null
         : candidateMonths;
       const statedCount = fact.statedPaidMonthCount?.value ?? null;
-      const derived = derivePaidMonthFacts(paidMonths, statedCount);
+      const periodMonths = fact.period?.value?.split("/") ?? [];
+      const interval =
+        periodMonths.length === 2
+          ? { startMonth: periodMonths[0], endMonth: periodMonths[1] }
+          : null;
+      const derived = derivePaidMonthFacts(paidMonths, statedCount, interval);
       const sourceRows = [...new Set(fact.months.map((month) => month.row))];
       const confidenceValues = [
         fact.companyCell.confidence,
@@ -1221,9 +1227,8 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
             derivedFrom: {
               startMonth: fact.intervalEvidence!.startMonth,
               endMonth: fact.intervalEvidence!.endMonth,
-              continuityEvidenceIds: [
-                ...fact.intervalEvidence!.continuityEvidenceIds,
-              ],
+              statedPaidMonthCount:
+                fact.intervalEvidence!.statedPaidMonthCount,
             },
           }))
         : monthlyRecords
@@ -1238,12 +1243,11 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
         companyEvidence?.id,
         ...monthlyRecords.flatMap((record) => record.evidenceIds),
         ...(fact.period?.evidenceIds ?? []),
-        ...(fact.intervalEvidence?.continuityEvidenceIds ?? []),
         ...(fact.statedPaidMonthCount?.evidenceIds ?? []),
       ].filter((value): value is string => Boolean(value));
       const countMismatch = derived.monthCountCrosscheck === "MISMATCH";
       const requiresManualReview =
-        fact.requiresManualReview || paidMonths === null || countMismatch;
+        fact.requiresManualReview || countMismatch;
       const rawRecord: SocialSecurityRawRecord = {
         companyRaw: reference(
           fact.companyCell.rawText,
@@ -1267,29 +1271,20 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
         derived,
         evidenceIds,
         status: requiresManualReview ? "MANUAL_REVIEW_REQUIRED" : "PARSED",
-        warnings: [
-          ...(fact.period && !fact.intervalEvidence
-            ? ["CONTINUOUS_INTERVAL_UNVALIDATED"]
-            : []),
-          ...(countMismatch ? ["MONTH_COUNT_MISMATCH"] : []),
-        ],
+        warnings: countMismatch ? ["MONTH_COUNT_MISMATCH"] : [],
       };
       rawRecords.push(rawRecord);
       const baseSource = combinedSource(
         unpacked.sourceFile,
         [fact.companyRow, ...sourceRows],
       );
-      const continuityQuotes = (
-        fact.intervalEvidence?.continuityEvidenceIds ?? []
-      )
-        .map((id) => evidence.find((entry) => entry.id === id)?.rawValue)
-        .filter((value): value is string => Boolean(value));
       parsedRecords.push({
         companyRaw: fact.companyCell.rawText,
         companyNormalized: normalizeCompanyName(fact.companyCell.rawText),
         startMonth: derived.startMonth ?? candidateMonths[0],
         endMonth: derived.endMonth ?? candidateMonths.at(-1)!,
         paidMonths,
+        statedPaidMonthCount: statedCount,
         pensionMonths: null,
         injuryMonths: null,
         unemploymentMonths: null,
@@ -1304,7 +1299,7 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
         },
         source: {
           ...baseSource,
-          quote: [...continuityQuotes, baseSource.quote].join("\n"),
+          quote: baseSource.quote,
         },
         rawRecord,
       });
@@ -1324,24 +1319,15 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
       (companies) => companies.size > 1,
     );
     return {
-      template: detected,
+      template: "GENERIC",
       status: autoVerifiable ? "parsed" : "manual-required",
       autoVerifiable,
       records: parsedRecords,
       rawRecords,
       sameMonthMultiCompany,
       reasons: parsedRecords.length
-        ? [
-            `TEMPLATE_HINT:${detected}`,
-            ...(autoVerifiable
-              ? []
-              : [
-                  ...new Set(
-                    rawRecords.flatMap((record) => record.warnings),
-                  ),
-                ]),
-          ]
-        : ["PARSER_FAILED", `TEMPLATE_HINT:${detected}`],
+        ? [...new Set(rawRecords.flatMap((record) => record.warnings))]
+        : ["PARSER_FAILED"],
     };
   }
 }

@@ -199,6 +199,19 @@ export function EvidenceResultView({
   const [reviewMessage, setReviewMessage] = useState("");
   const [selectedId, setSelectedId] = useState(model.items[0]?.id ?? "");
   const selected = model.items.find((item) => item.id === selectedId) ?? model.items[0];
+  const reviewFields =
+    selected?.businessResult.comparison.reviewRequiredFields ?? [];
+  const reviewFieldLabel = (field: string) =>
+    ({
+      "resume.companyRaw": "简历公司名称",
+      "resume.position": "简历职位",
+      "resume.startMonth": "简历开始时间",
+      "resume.endMonth": "简历结束时间",
+      "social.companyRaw": "社保公司名称",
+      "social.startMonth": "社保开始时间",
+      "social.endMonth": "社保结束时间",
+      "social.paidMonths": "实际缴纳月份",
+    })[field] ?? field;
 
   async function saveReview(reviewStatus: HumanReviewStatus) {
     setReviewMessage("正在保存…");
@@ -274,9 +287,17 @@ export function EvidenceResultView({
             ["需复核", model.summary.manualReviewCount],
           ].map(([label, value]) => <div key={label}><strong>{value}</strong><span>{label}</span></div>)}
         </section>
+        {reviewFields.length > 0 && (
+          <details className="attention-panel">
+            <summary>{reviewFields.length} 个字段需要人工确认</summary>
+            {reviewFields.map((field) => (
+              <p key={field}>{reviewFieldLabel(field)}需要人工确认</p>
+            ))}
+          </details>
+        )}
         {model.evidenceIssues.length > 0 && (
           <details className="attention-panel">
-            <summary>{model.evidenceIssues.length} 项证据状态需要关注</summary>
+            <summary>技术证据详情（{model.evidenceIssues.length}）</summary>
             {model.evidenceIssues.map((issue, index) => (
               <p key={`${issue.field}-${index}`}>{issue.code} · 第 {issue.sourcePage} 页 · {issue.message}</p>
             ))}

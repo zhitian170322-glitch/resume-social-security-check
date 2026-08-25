@@ -185,6 +185,7 @@ export const SocialSecurityEvidenceRecordSchema = z
     startMonth: EvidenceMonthFieldSchema,
     endMonth: EvidenceMonthFieldSchema,
     paidMonths: EvidenceMonthsFieldSchema,
+    statedPaidMonthCount: EvidenceNumberFieldSchema.optional(),
     pensionMonths: EvidenceNumberFieldSchema,
     injuryMonths: EvidenceNumberFieldSchema,
     unemploymentMonths: EvidenceNumberFieldSchema,

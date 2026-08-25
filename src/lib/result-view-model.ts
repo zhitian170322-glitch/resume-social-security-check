@@ -92,12 +92,21 @@ export type VerificationBusinessResult = {
     companyRaw: string | null;
     startMonth: string | null;
     endMonth: string | null;
+    statedPaidMonthCount: number | null;
     paidMonthCount: number | null;
     paidYears: number | null;
     paidRemainingMonths: number | null;
     paidDuration: string | null;
+    timeSpanMonths: number | null;
     gapMonths: string[];
     gapSummary: string;
+    fieldStatus: {
+      companyRaw: DisplayEvidenceStatus;
+      startMonth: DisplayEvidenceStatus;
+      endMonth: DisplayEvidenceStatus;
+      paidMonths: DisplayEvidenceStatus;
+      statedPaidMonthCount: DisplayEvidenceStatus;
+    };
   } | null;
   comparison: {
     companyMatch:
@@ -269,6 +278,14 @@ function flattenEvidenceFields(report: VerificationReportV2) {
       { field: `social.${index}.startMonth`, evidence: record.startMonth },
       { field: `social.${index}.endMonth`, evidence: record.endMonth },
       { field: `social.${index}.paidMonths`, evidence: record.paidMonths },
+      ...(record.statedPaidMonthCount
+        ? [
+            {
+              field: `social.${index}.statedPaidMonthCount`,
+              evidence: record.statedPaidMonthCount,
+            },
+          ]
+        : []),
       { field: `social.${index}.pensionMonths`, evidence: record.pensionMonths },
       { field: `social.${index}.injuryMonths`, evidence: record.injuryMonths },
       {
@@ -283,8 +300,11 @@ function flattenEvidenceFields(report: VerificationReportV2) {
 function issueDisplayStatus(
   issues: EvidenceIssue[],
 ): DisplayEvidenceStatus | null {
+  const relevantIssues = issues.filter(
+    (issue) => issue.code !== "TEMPLATE_UNKNOWN",
+  );
   if (
-    issues.some((issue) =>
+    relevantIssues.some((issue) =>
       [
         "EVIDENCE_MISMATCH",
         "EXTRACTION_CONFLICT",
@@ -296,21 +316,21 @@ function issueDisplayStatus(
     return "CONFLICT";
   }
   if (
-    issues.some((issue) =>
+    relevantIssues.some((issue) =>
       ["OCR_CONFIDENCE_LOW", "CELL_CONFIDENCE_LOW"].includes(issue.code),
     )
   ) {
     return "LOW_CONFIDENCE";
   }
   if (
-    issues.some((issue) =>
+    relevantIssues.some((issue) =>
       ["SOURCE_QUOTE_MISSING", "CELL_EVIDENCE_MISSING"].includes(issue.code),
     )
   ) {
     return "MISSING";
   }
   if (
-    issues.some((issue) =>
+    relevantIssues.some((issue) =>
       [
         "EXTRACTION_UNSUPPORTED",
         "TRANSFORMATION_UNSUPPORTED",
@@ -320,7 +340,7 @@ function issueDisplayStatus(
   ) {
     return "UNSUPPORTED";
   }
-  return issues.length ? "UNCERTAIN" : null;
+  return relevantIssues.length ? "UNCERTAIN" : null;
 }
 
 function fieldDisplayStatus(
@@ -374,6 +394,25 @@ function matchingFieldIssues(
       aliases.some((alias) => field.includes(alias.toLowerCase()))
     );
   });
+}
+
+function issuesForFlattenedField(
+  issues: EvidenceIssue[],
+  flattenedField: string | undefined,
+) {
+  const match = flattenedField?.match(/^(resume|social)\.(\d+)\.(.+)$/);
+  if (!match) {
+    return flattenedField === "candidateName"
+      ? issues.filter((issue) => issue.field === "candidateName")
+      : [];
+  }
+  const [, domain, index, field] = match;
+  return matchingFieldIssues(
+    issues,
+    domain as "resume" | "social",
+    Number(index),
+    [field],
+  );
 }
 
 function findResumeExperience(
@@ -614,6 +653,19 @@ function businessResult(input: {
           )
         : [],
     ),
+    statedPaidMonthCount: social?.statedPaidMonthCount
+      ? fieldDisplayStatus(
+          social.statedPaidMonthCount,
+          socialMatch
+            ? matchingFieldIssues(
+                input.report.evidenceIssues,
+                "social",
+                socialMatch.index,
+                ["statedPaidMonthCount"],
+              )
+            : [],
+        )
+      : "MISSING" as const,
   };
   const start = dateComparison({
     kind: "start",
@@ -653,7 +705,8 @@ function businessResult(input: {
       ? input.sourceItem.paidMonths
       : (social?.paidMonths.value ?? []));
   const paidMonthCount = social
-    ? (derivedForDisplay?.paidMonthCount ?? paidMonths.length)
+    ? (derivedForDisplay?.paidMonthCount ??
+      (social.paidMonths.value === null ? null : paidMonths.length))
     : null;
   const paidYears =
     paidMonthCount === null
@@ -668,6 +721,12 @@ function businessResult(input: {
   const gapMonths = social
     ? [...(derivedForDisplay?.gapMonths ?? input.sourceItem.gapMonths ?? [])]
     : [];
+  const timeSpanMonths =
+    social?.startMonth.value && social.endMonth.value
+      ? monthIndex(social.endMonth.value) -
+        monthIndex(social.startMonth.value) +
+        1
+      : null;
   const scenario =
     input.matchStatus === "MANUAL_REVIEW_REQUIRED" ||
     input.matchStatus === "INSUFFICIENT_EVIDENCE"
@@ -704,6 +763,8 @@ function businessResult(input: {
           companyRaw: social.companyRaw.value,
           startMonth: social.startMonth.value,
           endMonth: social.endMonth.value,
+          statedPaidMonthCount:
+            social.statedPaidMonthCount?.value ?? null,
           paidMonthCount,
           paidYears,
           paidRemainingMonths,
@@ -712,10 +773,12 @@ function businessResult(input: {
               ? null
               : (derivedForDisplay?.paidDuration ??
                 formatPaidDuration(paidYears, paidRemainingMonths)),
+          timeSpanMonths,
           gapMonths,
           gapSummary: gapMonths.length
             ? `${gapMonths.length}个月`
             : "无",
+          fieldStatus: socialStatus,
         }
       : null,
     comparison: {
@@ -755,7 +818,6 @@ function specialLabels(item: {
   if (item.matchStatus === "RESUME_ONLY") add("简历存在、无社保证据");
   if (item.matchStatus === "GAP_DETECTED" || item.gapMonths.length)
     add("月份断缴");
-  if (item.warnings.includes("TEMPLATE_UNKNOWN")) add("未知社保模板");
   if (
     item.warnings.some((warning) =>
       ["OCR_CONFIDENCE_LOW", "CELL_CONFIDENCE_LOW"].includes(warning),
@@ -763,8 +825,6 @@ function specialLabels(item: {
   )
     add("OCR 低置信度");
   if (item.warnings.includes("EXTRACTION_CONFLICT")) add("PDF / OCR 冲突");
-  if (issues.some((issue) => issue.code === "TEMPLATE_UNKNOWN"))
-    add("未知社保模板");
   if (
     issues.some((issue) =>
       ["OCR_CONFIDENCE_LOW", "CELL_CONFIDENCE_LOW"].includes(issue.code),
@@ -862,10 +922,9 @@ export function buildResultViewModel(input: {
           entry.evidence.sourceQuote === reference.sourceQuote &&
           entry.evidence.extractionMethod === reference.extractionMethod,
       );
-      const matchingIssues = report.evidenceIssues.filter(
-        (issue) =>
-          issue.sourceFile === reference.sourceFile &&
-          issue.sourcePage === reference.sourcePage,
+      const matchingIssues = issuesForFlattenedField(
+        report.evidenceIssues,
+        matched?.field,
       );
       const rawValue = rawFieldValue(matched?.evidence);
       const cells = input.tableCells.filter(

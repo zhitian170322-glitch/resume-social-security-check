@@ -117,7 +117,7 @@ export const PIPELINE_VERSIONS: PipelineArtifactVersions = {
   evidenceValidatorVersion: EVIDENCE_VALIDATOR_VERSION,
   verificationEngineVersion: VERIFICATION_ENGINE_VERSION,
 };
-const PIPELINE_VERSION = `evidence-v2.6:${JSON.stringify(PIPELINE_VERSIONS)}`;
+const PIPELINE_VERSION = `evidence-v2.7:${JSON.stringify(PIPELINE_VERSIONS)}`;
 
 export function isEvidencePipelineTask(
   task: Pick<TaskRow, "task_schema_version" | "extraction_version">,
@@ -691,7 +691,7 @@ function convertParsedRecord(
   const endStatus = statusFor(record.fieldConfidence.endMonth);
   const paidStatus = record.paidMonths?.length
     ? statusFor(record.fieldConfidence.paidMonths)
-    : ("unsupported" as const);
+    : ("missing" as const);
   const companyUncertain = /[OIl]/.test(record.companyRaw);
   const outsourcingOrDispatch = /劳务派遣|人力资源|外包/.test(record.companyRaw);
   return {
@@ -719,6 +719,13 @@ function convertParsedRecord(
       record,
       paidStatus,
       record.fieldConfidence.paidMonths,
+    ),
+    statedPaidMonthCount: numberEvidence(
+      record.statedPaidMonthCount,
+      record,
+      record.statedPaidMonthCount === null
+        ? "missing"
+        : statusFor(record.source.confidence),
     ),
     pensionMonths: numberEvidence(
       record.pensionMonths,
@@ -754,7 +761,7 @@ function convertParsedRecord(
         companyStatus,
         startStatus,
         endStatus,
-        paidStatus,
+        ...(record.paidMonths?.length ? [paidStatus] : []),
       ].every((status) => status === "verified")
         ? []
         : ["OCR_CONFIDENCE_LOW"]),
@@ -775,6 +782,7 @@ function unsupportedSocialRecord(
     startMonth: "1970-01",
     endMonth: "1970-01",
     paidMonths: [],
+    statedPaidMonthCount: null,
     pensionMonths: null,
     injuryMonths: null,
     unemploymentMonths: null,
@@ -900,20 +908,6 @@ async function structureStage(
     const converted = parsed.records.map((record) =>
       convertParsedRecord(record, "generic"),
     );
-    if (!parsed.autoVerifiable) {
-      converted.forEach((record) =>
-        record.warnings.push("GENERIC_STRUCTURE_REQUIRES_REVIEW"),
-      );
-      issues.push({
-        code: "EXTRACTION_UNSUPPORTED",
-        field: "socialSecurityStructure",
-        sourceFile,
-        sourcePage: merged.page,
-        message:
-          parsed.reasons.join("；") ||
-          "通用结构提取结果缺少可自动验证的逐月 Evidence",
-      });
-    }
     social.push(...converted);
   }
   return { resume, social, issues };

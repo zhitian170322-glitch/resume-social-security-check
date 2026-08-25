@@ -15,8 +15,8 @@ import {
 } from "./verification-engine-phase8";
 import type { PipelineArtifactVersions } from "./stage-cache";
 
-export const PARSER_VERSION = "social-security-generic-parser-v2";
-export const EVIDENCE_VALIDATOR_VERSION = "evidence-validator-phase7-v1";
+export const PARSER_VERSION = "social-security-generic-parser-v3";
+export const EVIDENCE_VALIDATOR_VERSION = "evidence-validator-phase7-v2";
 export const VERIFICATION_ENGINE_VERSION = "verification-engine-phase8-v1";
 export const EVIDENCE_PIPELINE_STAGE_ORDER = [
   "DOCUMENT_INGESTED",
@@ -128,8 +128,8 @@ function countEvidence(
 ) {
   return (
     1 +
-    resume.experiences.length * 3 +
-    social.length * 7
+    resume.experiences.length * 4 +
+    social.length * 5
   );
 }
 
@@ -139,11 +139,25 @@ export function createEvidenceValidationStage(input: {
   socialValidation: EvidenceValidationResult<SocialSecurityEvidenceRecord[]>;
   upstreamIssues: EvidenceIssue[];
 }): EvidenceValidationStagePayload {
-  const upstreamStatus = issueStatus(input.upstreamIssues);
+  const resumeUpstreamIssues = input.upstreamIssues.filter(
+    (issue) =>
+      issue.field === "candidateName" ||
+      /^(?:resume|experiences)\./u.test(issue.field),
+  );
+  const socialUpstreamIssues = input.upstreamIssues.filter((issue) =>
+    /^(?:records\.|social(?:\.|Security))/u.test(issue.field),
+  );
+  const unscopedIssues = input.upstreamIssues.filter(
+    (issue) =>
+      !resumeUpstreamIssues.includes(issue) &&
+      !socialUpstreamIssues.includes(issue),
+  );
   const resumeStatus =
-    upstreamStatus ?? input.resumeValidation.validationStatus;
+    issueStatus([...unscopedIssues, ...resumeUpstreamIssues]) ??
+    input.resumeValidation.validationStatus;
   const socialStatus =
-    upstreamStatus ?? input.socialValidation.validationStatus;
+    issueStatus([...unscopedIssues, ...socialUpstreamIssues]) ??
+    input.socialValidation.validationStatus;
   const statuses = [resumeStatus, socialStatus];
   const validationStatus = statuses.includes("CONFLICT")
     ? "CONFLICT"

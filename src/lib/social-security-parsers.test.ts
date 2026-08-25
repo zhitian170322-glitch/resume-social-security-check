@@ -364,12 +364,12 @@ describe("template hints and generic extraction", () => {
 
     expect(detectSocialSecurityTemplate(input)).toBe("UNKNOWN");
     expect(direct).toMatchObject({
-      template: "UNKNOWN",
+      template: "GENERIC",
       status: "manual-required",
       autoVerifiable: false,
       records: [],
       rawRecords: [],
-      reasons: ["PARSER_FAILED", "TEMPLATE_HINT:UNKNOWN"],
+      reasons: ["PARSER_FAILED"],
     });
     expect(selected).toEqual(direct);
   });
@@ -440,7 +440,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
       },
     ]);
     expect(result).toMatchObject({
-      template: "UNKNOWN",
+      template: "GENERIC",
       status: "manual-required",
       autoVerifiable: false,
     });
@@ -498,7 +498,7 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
     });
   });
 
-  it("does not expand Guangdong-style endpoints without explicit continuity semantics", () => {
+  it("keeps endpoint-only material as a span with unknown paid months", () => {
     const input = ocr("参保起止时间 单位 养老 工伤 失业", [
       table("guangdong-layout", [
         cell("参保起止时间", 0, 0),
@@ -524,13 +524,20 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
       },
     ]);
     expect(result).toMatchObject({
-      status: "manual-required",
-      autoVerifiable: false,
+      status: "parsed",
+      autoVerifiable: true,
     });
     expect(result.rawRecords[0]).toMatchObject({
       derivedPaidMonths: null,
       intervalEvidence: null,
-      status: "MANUAL_REVIEW_REQUIRED",
+      status: "PARSED",
+      warnings: [],
+      derived: {
+        startMonth: "2022-12",
+        endMonth: "2023-02",
+        paidMonthCount: null,
+        timeSpanMonths: 3,
+      },
     });
     const validation = validateSocialSecurityRawRecords(
       result.rawRecords,
@@ -541,11 +548,11 @@ describe("[anonymized real-layout regression] Generic Structured Extractor", () 
   });
 });
 
-describe("continuous interval derived evidence", () => {
+describe("interval and stated month count evidence", () => {
   function continuousIntervalInput(statedMonths = 29) {
-    return ocr("连续缴费区间 2022-12 ～ 2025-04 累计29个月", [
+    return ocr("缴费区间 2022-12 ～ 2025-04 累计29个月", [
       table("continuous-interval", [
-        cell("连续缴费区间", 0, 0, 0.97),
+        cell("缴费区间", 0, 0, 0.97),
         cell("单位名称", 0, 2, 0.97),
         cell("累计缴费月数", 0, 3, 0.97),
         cell("2022-12 ～ 2025-04", 1, 0, 0.97),
@@ -555,7 +562,7 @@ describe("continuous interval derived evidence", () => {
     ]);
   }
 
-  it("expands a validated continuous interval into 29 lineage-backed months", () => {
+  it("expands an interval with a matching stated count without continuity keywords", () => {
     const input = continuousIntervalInput();
     const documentId = "continuous-29";
     const evidence = buildSocialSecurityCellEvidence(documentId, input);
@@ -633,7 +640,10 @@ describe("continuous interval derived evidence", () => {
       derivedFrom: {
         startMonth: { value: "2022-12", evidenceIds: [expect.any(String)] },
         endMonth: { value: "2025-04", evidenceIds: [expect.any(String)] },
-        continuityEvidenceIds: [expect.any(String)],
+        statedPaidMonthCount: {
+          value: 29,
+          evidenceIds: [expect.any(String)],
+        },
       },
     });
     expect(record.monthlyRecords).toEqual([]);
@@ -663,6 +673,7 @@ describe("continuous interval derived evidence", () => {
       startMonth: { ...fieldBase, value: "2022-12" },
       endMonth: { ...fieldBase, value: "2025-04" },
       paidMonths: { ...fieldBase, value: record.paidMonths },
+      statedPaidMonthCount: { ...fieldBase, value: 29 },
       pensionMonths: { ...fieldBase, value: 29 },
       injuryMonths: { ...fieldBase, value: 29 },
       unemploymentMonths: { ...fieldBase, value: 29 },
@@ -689,6 +700,22 @@ describe("continuous interval derived evidence", () => {
       automaticEligible: true,
       issues: [],
     });
+
+    const lowEndMonth = structuredClone(converted);
+    lowEndMonth.endMonth.confidence = 0.2;
+    const fieldLevel = validateSocialEvidence([lowEndMonth], [documentPage]);
+    expect(fieldLevel.value[0]).toMatchObject({
+      companyRaw: { status: "verified" },
+      startMonth: { status: "verified" },
+      endMonth: { status: "uncertain" },
+      paidMonths: { status: "verified" },
+    });
+    expect(fieldLevel.issues).toEqual([
+      expect.objectContaining({
+        code: "OCR_CONFIDENCE_LOW",
+        field: "records.0.endMonth",
+      }),
+    ]);
   });
 
   it("requires manual review when stated and derived month counts differ", () => {
@@ -710,8 +737,9 @@ describe("continuous interval derived evidence", () => {
       status: "MANUAL_REVIEW_REQUIRED",
       warnings: ["MONTH_COUNT_MISMATCH"],
       derived: {
-        paidMonthCount: 29,
+        paidMonthCount: null,
         statedPaidMonthCount: 28,
+        timeSpanMonths: 29,
         monthCountCrosscheck: "MISMATCH",
       },
     });

@@ -190,6 +190,7 @@ function model(input?: {
   issues?: EvidenceIssue[];
   humanReview?: HumanReview;
   derivedPaidMonths?: string[];
+  includeDerivedFacts?: boolean;
   mutateReport?: (value: VerificationReportV2) => void;
 }) {
   const verificationItem = input?.verificationItem ?? item();
@@ -203,7 +204,7 @@ function model(input?: {
     taskSchemaVersion: 2,
     result,
     verification,
-    derivedFacts: {
+    derivedFacts: input?.includeDerivedFacts === false ? null : {
       versions: {
         taskSchemaVersion: 2,
         extractionVersion: "synthetic",
@@ -447,6 +448,45 @@ describe("[synthetic] Phase 9 Result UI mapping", () => {
       expect(formatPaidDuration(years, remaining)).toBe(label);
     },
   );
+
+  it("[synthetic] keeps interval span separate from unknown actual paid months", () => {
+    const verificationItem = item("MANUAL_REVIEW_REQUIRED");
+    verificationItem.socialSecurityPeriod = {
+      startMonth: "2022-12",
+      endMonth: "2025-04",
+    };
+    verificationItem.paidMonths = [];
+    const mapped = model({
+      verificationItem,
+      includeDerivedFacts: false,
+      mutateReport(value) {
+        value.socialSecurityRecords[0].startMonth.value = "2022-12";
+        value.socialSecurityRecords[0].endMonth.value = "2025-04";
+        value.socialSecurityRecords[0].paidMonths = {
+          ...evidenceBase,
+          status: "missing",
+          value: null,
+        };
+      },
+    });
+
+    expect(mapped).toMatchObject({
+      legacy: false,
+      items: [
+        {
+          businessResult: {
+            social: {
+              paidMonthCount: null,
+              paidYears: null,
+              paidRemainingMonths: null,
+              paidDuration: null,
+              timeSpanMonths: 29,
+            },
+          },
+        },
+      ],
+    });
+  });
 
   it("[synthetic] I: displays paidMonths and supplied gap without recalculation", () => {
     const value = item("GAP_DETECTED");

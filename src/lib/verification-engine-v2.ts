@@ -64,7 +64,6 @@ function usableSocial(record: SocialSecurityEvidenceRecord) {
     record.paidMonths.value !== null &&
     !record.warnings.some((warning) =>
       [
-        "TEMPLATE_UNKNOWN",
         "TEMPLATE_INCOMPLETE",
         "OCR_CONFIDENCE_LOW",
         "OCR_COMPANY_UNCERTAIN",

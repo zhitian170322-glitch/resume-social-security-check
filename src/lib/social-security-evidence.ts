@@ -62,10 +62,10 @@ export interface SocialSecurityMonthlyRecord {
 }
 
 export interface SocialSecurityIntervalEvidence {
-  semantics: "EXPLICIT_CONTINUOUS_INTERVAL";
+  semantics: "INTERVAL_WITH_STATED_MONTH_COUNT";
   startMonth: EvidenceReference<string>;
   endMonth: EvidenceReference<string>;
-  continuityEvidenceIds: string[];
+  statedPaidMonthCount: EvidenceReference<number>;
 }
 
 export interface SocialSecurityPaidMonthEvidence {
@@ -75,7 +75,7 @@ export interface SocialSecurityPaidMonthEvidence {
   derivedFrom: {
     startMonth: EvidenceReference<string>;
     endMonth: EvidenceReference<string>;
-    continuityEvidenceIds: string[];
+    statedPaidMonthCount: EvidenceReference<number>;
   } | null;
 }
 
@@ -146,18 +146,22 @@ export function inclusiveMonthRange(startMonth: string, endMonth: string) {
 export function derivePaidMonthFacts(
   paidMonths: string[] | null,
   statedPaidMonthCount: number | null = null,
+  interval: { startMonth: string; endMonth: string } | null = null,
 ): SocialSecurityRawRecord["derived"] {
   if (!paidMonths?.length) {
+    const intervalMonths = interval
+      ? inclusiveMonthRange(interval.startMonth, interval.endMonth)
+      : [];
     return {
-      startMonth: null,
-      endMonth: null,
+      startMonth: intervalMonths.length ? interval!.startMonth : null,
+      endMonth: intervalMonths.length ? interval!.endMonth : null,
       paidMonthCount: null,
       derivedPaidMonthCount: null,
       statedPaidMonthCount,
       paidYears: null,
       paidRemainingMonths: null,
       paidDuration: null,
-      timeSpanMonths: null,
+      timeSpanMonths: intervalMonths.length ? intervalMonths.length : null,
       monthCountCrosscheck:
         statedPaidMonthCount === null ? "NOT_STATED" : "MISMATCH",
       gapMonths: [],
