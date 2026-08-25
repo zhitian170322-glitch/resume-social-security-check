@@ -171,7 +171,7 @@ describe("[synthetic] Evidence Validator", () => {
     });
   });
 
-  it("[synthetic] blocks PDF/OCR extraction conflicts before verification", () => {
+  it("[synthetic] does not turn a page conflict into a blanket field conflict", () => {
     const conflictPage: DocumentPage = {
       ...page,
       ocrText: "2022.03-2024.05\n腾讯科技有限公司",
@@ -180,20 +180,20 @@ describe("[synthetic] Evidence Validator", () => {
       warnings: ["EXTRACTION_CONFLICT"],
     };
     const input: ResumeEvidenceExtraction = {
-      candidateName: evidence("腾讯科技", "腾讯科技"),
+      candidateName: {
+        ...evidence("腾讯科技", "腾讯科技"),
+        extractionMethod: "pdf_text",
+        sourceMethod: "pdf_text",
+      },
       experiences: [],
     };
     const validated = validateResumeEvidence(input, [conflictPage]);
     expect(validated).toMatchObject({
-      valid: false,
-      automaticEligible: false,
-      validationStatus: "CONFLICT",
+      valid: true,
+      automaticEligible: true,
+      validationStatus: "VALIDATED",
     });
-    expect(validated.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "EXTRACTION_CONFLICT" }),
-      ]),
-    );
+    expect(validated.issues).toEqual([]);
   });
 
   it("[synthetic] blocks fields already marked uncertain", () => {

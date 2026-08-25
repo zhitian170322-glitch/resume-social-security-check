@@ -129,7 +129,7 @@ function pageTextForField(
   page: DocumentPage,
   field: EvidenceStringField | EvidenceMonthField | EvidenceNumberField | EvidenceMonthsField,
 ) {
-  switch (field.extractionMethod) {
+  switch (field.sourceMethod ?? field.extractionMethod) {
     case "pdf_text":
       return page.pdfText ?? "";
     case "ocr":
@@ -199,7 +199,7 @@ function validateFieldGate(
     });
   }
   if (
-    (field.extractionMethod === "ocr" ||
+    ((field.sourceMethod ?? field.extractionMethod) === "ocr" ||
       field.extractionMethod === "table_ocr" ||
       field.extractionMethod === "deepseek") &&
     field.confidence < config.OCR_MIN_CONFIDENCE
@@ -212,26 +212,47 @@ function validateFieldGate(
       message: "字段提取置信度低于自动核验阈值",
     });
   }
+  const sourceMethod = field.sourceMethod ?? field.extractionMethod;
+  const sourceExists =
+    sourceMethod === "pdf_text"
+      ? Boolean(page?.pdfText)
+      : sourceMethod === "ocr" || sourceMethod === "table_ocr"
+        ? Boolean(page?.ocrText)
+        : Boolean(page?.selectedText);
+  if (!page || !sourceExists) {
+    issues.push({
+      code: "EXTRACTION_UNSUPPORTED",
+      field: fieldName,
+      sourceFile: field.sourceFile,
+      sourcePage: field.sourcePage,
+      message: "字段引用的原始来源不存在",
+    });
+  }
   if (
-    !page ||
-    page.extractionMethod === "manual_required" ||
-    page.warnings.includes("OCR_CONFIDENCE_LOW")
+    sourceMethod === "pdf_text" &&
+    page &&
+    page.qualityScore < config.TEXT_QUALITY_MIN_SCORE
   ) {
     issues.push({
       code: "EXTRACTION_UNSUPPORTED",
       field: fieldName,
       sourceFile: field.sourceFile,
       sourcePage: field.sourcePage,
-      message: "来源页面不允许自动提取",
+      message: "字段引用的 PDF Text 质量低于自动核验阈值",
     });
   }
-  if (page?.warnings.includes("EXTRACTION_CONFLICT")) {
+  if (
+    sourceMethod === "ocr" &&
+    page &&
+    (page.ocrConfidence === null ||
+      page.ocrConfidence < config.OCR_MIN_CONFIDENCE)
+  ) {
     issues.push({
-      code: "EXTRACTION_CONFLICT",
+      code: "OCR_CONFIDENCE_LOW",
       field: fieldName,
       sourceFile: field.sourceFile,
       sourcePage: field.sourcePage,
-      message: "PDF 与 OCR 提取结果冲突",
+      message: "字段引用的 OCR 页面置信度低于自动核验阈值",
     });
   }
   return issues;
@@ -259,6 +280,46 @@ export function validateCompanyEvidence(
       message: "公司名称结构化值不是原文片段的逐字子串，禁止自动核验",
     });
   }
+  if (
+    field.value &&
+    field.rawValue !== undefined &&
+    field.rawValue !== field.value
+  ) {
+    issues.push({
+      code: "EVIDENCE_MISMATCH",
+      field: fieldName,
+      sourceFile: field.sourceFile,
+      sourcePage: field.sourcePage,
+      message: "公司原始值被改写或标准化，禁止自动核验",
+    });
+  }
+  return issues;
+}
+
+function validateTextEvidence(
+  pages: DocumentPage[],
+  field: EvidenceStringField,
+  fieldName: string,
+): EvidenceIssue[] {
+  const issues = [
+    ...validateFieldGate(pages, field, fieldName),
+    ...validateQuote(pages, field, fieldName),
+  ];
+  const rawValue = field.rawValue ?? field.value;
+  if (
+    field.value &&
+    (!rawValue ||
+      field.value !== rawValue ||
+      !field.sourceQuote.includes(rawValue))
+  ) {
+    issues.push({
+      code: "EVIDENCE_MISMATCH",
+      field: fieldName,
+      sourceFile: field.sourceFile,
+      sourcePage: field.sourcePage,
+      message: "文本字段不是原文片段中的逐字事实",
+    });
+  }
   return issues;
 }
 
@@ -271,13 +332,34 @@ export function validateMonthEvidence(
     ...validateFieldGate(pages, field, fieldName),
     ...validateQuote(pages, field, fieldName),
   ];
-  if (field.value && !extractYearMonths(field.sourceQuote).includes(field.value)) {
+  const present =
+    /至今|目前|present/iu.test(field.rawValue ?? field.sourceQuote) &&
+    field.normalizedValue === field.value;
+  if (
+    field.value &&
+    !present &&
+    !extractYearMonths(field.sourceQuote).includes(field.value)
+  ) {
     issues.push({
       code: "EVIDENCE_MISMATCH",
       field: fieldName,
       sourceFile: field.sourceFile,
       sourcePage: field.sourcePage,
       message: "结构化月份无法由原文片段按受控规则转换得到",
+    });
+  }
+  const candidateMonths = new Set(
+    (field.sourceCandidates ?? [])
+      .flatMap((candidate) => extractYearMonths(candidate.rawValue))
+      .filter(Boolean),
+  );
+  if (candidateMonths.size > 1) {
+    issues.push({
+      code: "EXTRACTION_CONFLICT",
+      field: fieldName,
+      sourceFile: field.sourceFile,
+      sourcePage: field.sourcePage,
+      message: "该月份字段的 PDF Text 与 OCR 候选值冲突",
     });
   }
   return issues;
@@ -345,39 +427,58 @@ export function validateResumeEvidence(
   );
   if (issues.length) value.candidateName.status = "uncertain";
   value.experiences.forEach((experience, index) => {
-    const quotes = [
-      experience.resumeCompany.sourceQuote,
-      experience.resumeStartMonth.sourceQuote,
-      experience.resumeEndMonth.sourceQuote,
+    const fieldChecks = [
+      {
+        field: experience.resumeCompany,
+        checks: validateCompanyEvidence(
+          pages,
+          experience.resumeCompany,
+          `experiences.${index}.companyRaw`,
+        ),
+      },
+      ...(experience.position
+        ? [
+            {
+              field: experience.position,
+              checks:
+                experience.position.status === "missing" &&
+                experience.position.value === null
+                  ? []
+                  : validateTextEvidence(
+                      pages,
+                      experience.position,
+                      `experiences.${index}.position`,
+                    ),
+            },
+          ]
+        : []),
+      {
+        field: experience.resumeStartMonth,
+        checks: validateMonthEvidence(
+          pages,
+          experience.resumeStartMonth,
+          `experiences.${index}.startMonth`,
+        ),
+      },
+      {
+        field: experience.resumeEndMonth,
+        checks: validateMonthEvidence(
+          pages,
+          experience.resumeEndMonth,
+          `experiences.${index}.endMonth`,
+        ),
+      },
     ];
-    const sameBoundedBlock =
-      new Set(quotes).size === 1 &&
-      quotes[0].length <= 300 &&
-      experience.resumeCompany.sourceFile === experience.resumeStartMonth.sourceFile &&
-      experience.resumeCompany.sourceFile === experience.resumeEndMonth.sourceFile &&
-      experience.resumeCompany.sourcePage === experience.resumeStartMonth.sourcePage &&
-      experience.resumeCompany.sourcePage === experience.resumeEndMonth.sourcePage;
-    const checks: EvidenceIssue[] = [
-      ...validateCompanyEvidence(pages, experience.resumeCompany, `experiences.${index}.company`),
-      ...validateMonthEvidence(pages, experience.resumeStartMonth, `experiences.${index}.start`),
-      ...validateMonthEvidence(pages, experience.resumeEndMonth, `experiences.${index}.end`),
-    ];
-    if (!sameBoundedBlock) {
-      checks.push({
-        code: "EVIDENCE_MISMATCH",
-        field: `experiences.${index}`,
-        sourceFile: experience.resumeCompany.sourceFile,
-        sourcePage: experience.resumeCompany.sourcePage,
-        message: "公司与起止月份不是来自同一段不超过300字的连续原文区块",
-      });
+    for (const fieldCheck of fieldChecks) {
+      if (fieldCheck.checks.length) {
+        fieldCheck.field.status = "uncertain";
+        experience.warnings.push(
+          ...new Set(fieldCheck.checks.map((issue) => issue.code)),
+        );
+      }
+      issues.push(...fieldCheck.checks);
     }
-    if (checks.length) {
-      experience.resumeCompany.status = "uncertain";
-      experience.resumeStartMonth.status = "uncertain";
-      experience.resumeEndMonth.status = "uncertain";
-      experience.warnings.push(...new Set(checks.map((issue) => issue.code)));
-    }
-    issues.push(...checks);
+    experience.warnings = [...new Set(experience.warnings)];
   });
   return result(value, issues);
 }

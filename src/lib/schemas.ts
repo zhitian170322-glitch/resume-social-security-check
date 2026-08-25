@@ -107,6 +107,17 @@ export const ExtractionMethodSchema = z.enum([
   "deepseek",
 ]);
 
+export const ResumeFieldSourceCandidateSchema = z
+  .object({
+    rawValue: z.string().min(1),
+    sourceFile: z.string().min(1),
+    sourcePage: z.number().int().positive(),
+    sourceQuote: z.string().min(1),
+    sourceMethod: z.enum(["pdf_text", "ocr"]),
+    confidence: z.number().min(0).max(1),
+  })
+  .strict();
+
 const evidenceBase = {
   status: EvidenceStatusSchema,
   sourceFile: z.string().min(1),
@@ -114,6 +125,10 @@ const evidenceBase = {
   sourceQuote: z.string(),
   extractionMethod: ExtractionMethodSchema,
   confidence: z.number().min(0).max(1),
+  rawValue: z.string().nullable().optional(),
+  normalizedValue: z.string().nullable().optional(),
+  sourceMethod: z.enum(["pdf_text", "ocr"]).optional(),
+  sourceCandidates: z.array(ResumeFieldSourceCandidateSchema).optional(),
 };
 
 export const EvidenceStringFieldSchema = z
@@ -149,6 +164,7 @@ export const DocumentPageSchema = z
 export const ResumeEvidenceExperienceSchema = z
   .object({
     resumeCompany: EvidenceStringFieldSchema,
+    position: EvidenceStringFieldSchema.optional(),
     resumeStartMonth: EvidenceMonthFieldSchema,
     resumeEndMonth: EvidenceMonthFieldSchema,
     warnings: z.array(z.string()).default([]),
@@ -301,6 +317,9 @@ export type EvidenceStringField = z.infer<typeof EvidenceStringFieldSchema>;
 export type EvidenceMonthField = z.infer<typeof EvidenceMonthFieldSchema>;
 export type EvidenceNumberField = z.infer<typeof EvidenceNumberFieldSchema>;
 export type EvidenceMonthsField = z.infer<typeof EvidenceMonthsFieldSchema>;
+export type ResumeFieldSourceCandidate = z.infer<
+  typeof ResumeFieldSourceCandidateSchema
+>;
 export type DocumentPage = z.infer<typeof DocumentPageSchema>;
 export type ResumeEvidenceExperience = z.infer<typeof ResumeEvidenceExperienceSchema>;
 export type ResumeEvidenceExtraction = z.infer<typeof ResumeEvidenceExtractionSchema>;

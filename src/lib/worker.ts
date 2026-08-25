@@ -117,7 +117,7 @@ export const PIPELINE_VERSIONS: PipelineArtifactVersions = {
   evidenceValidatorVersion: EVIDENCE_VALIDATOR_VERSION,
   verificationEngineVersion: VERIFICATION_ENGINE_VERSION,
 };
-const PIPELINE_VERSION = `evidence-v2.5:${JSON.stringify(PIPELINE_VERSIONS)}`;
+const PIPELINE_VERSION = `evidence-v2.6:${JSON.stringify(PIPELINE_VERSIONS)}`;
 
 export function isEvidencePipelineTask(
   task: Pick<TaskRow, "task_schema_version" | "extraction_version">,
@@ -801,22 +801,6 @@ function unsupportedSocialRecord(
   };
 }
 
-function missingResume(pages: DocumentPage[]): ResumeEvidenceExtraction {
-  const first = pages[0];
-  const sourceFile = first?.sourceFile ?? "unknown";
-  const sourcePage = first?.page ?? 1;
-  const missing: EvidenceStringField = {
-    value: null,
-    status: "missing",
-    sourceFile,
-    sourcePage,
-    sourceQuote: "",
-    extractionMethod: "deepseek",
-    confidence: 0,
-  };
-  return { candidateName: missing, experiences: [] };
-}
-
 async function structureStage(
   task: TaskRow,
   payload: OCRStagePayload,
@@ -825,18 +809,20 @@ async function structureStage(
     (page) => page.sourceFile === payload.resumeSourceFile,
   );
   const issues: EvidenceIssue[] = [];
-  const manualResume = resumePages.some((page) => page.extractionMethod === "manual_required");
   const deepSeekCacheKey = contentHash(
     `${PIPELINE_VERSION}:deepseek-resume:${JSON.stringify(
-      resumePages.map((page) => [page.selectedText, page.extractionMethod]),
+      resumePages.map((page) => [
+        page.pdfText,
+        page.qualityScore,
+        page.ocrText,
+        page.ocrConfidence,
+      ]),
     )}`,
   );
   const cachedResume = readExtractionCache<ResumeEvidenceExtraction>(deepSeekCacheKey);
-  let resume = manualResume
-    ? missingResume(resumePages)
-    : ResumeEvidenceExtractionSchema.safeParse(cachedResume).success
-      ? ResumeEvidenceExtractionSchema.parse(cachedResume)
-      : null;
+  let resume = ResumeEvidenceExtractionSchema.safeParse(cachedResume).success
+    ? ResumeEvidenceExtractionSchema.parse(cachedResume)
+    : null;
   if (!resume) {
     resume = await extractResumeWithEvidence(resumePages, (metric) => {
         recordApiCall({
@@ -850,8 +836,8 @@ async function structureStage(
           estimatedCost: config.DEEPSEEK_ESTIMATED_COST_PER_CALL,
         });
       });
-    writeExtractionCache(deepSeekCacheKey, "deepseek", "resume-evidence-v2", resume);
-  } else if (!manualResume) {
+    writeExtractionCache(deepSeekCacheKey, "deepseek", "resume-field-evidence-v1", resume);
+  } else {
     recordApiCall({
       taskId: task.id,
       provider: "deepseek",
@@ -860,21 +846,6 @@ async function structureStage(
       cacheHit: true,
       estimatedCost: 0,
     });
-  }
-  if (manualResume) {
-    resumePages
-      .filter((page) => page.extractionMethod === "manual_required")
-      .forEach((page) => {
-        issues.push({
-          code: page.warnings.includes("EXTRACTION_CONFLICT")
-            ? "EXTRACTION_CONFLICT"
-            : "OCR_CONFIDENCE_LOW",
-          field: "documentPage",
-          sourceFile: page.sourceFile,
-          sourcePage: page.page,
-          message: "简历页面提取来源冲突或 OCR 置信度不足，禁止自动结构化",
-        });
-      });
   }
   const social: SocialSecurityEvidenceRecord[] = [];
   const socialByFile = new Map<string, SocialSecurityOCRResult[]>();
