@@ -350,11 +350,6 @@ const GUANGDONG_HEADERS = {
   maternity: ["生育", "生育保险"],
 };
 
-const GENERIC_HEADERS = {
-  company: ["单位名称", "参保单位", "缴费单位", "公司名称"],
-  month: ["缴费年月", "参保年月", "缴费月份", "费款所属期"],
-};
-
 function corpus(ocr: SocialSecurityOCRResult): string {
   return compact(
     [ocr.rawText, ...ocr.tables.flatMap((table) => table.cells.map((cell) => cell.text))]
@@ -850,6 +845,191 @@ export class GuangdongSocialSecurityParser implements SocialSecurityTableParser 
   }
 }
 
+interface GenericMonthFact {
+  value: string;
+  cell: SocialSecurityOCRCell;
+  row: TableRow;
+  confidence: number | null;
+  transformations: ValueTransformation[];
+  explicit: boolean;
+}
+
+interface GenericCompanyFact {
+  companyCell: SocialSecurityOCRCell;
+  companyRow: TableRow;
+  months: GenericMonthFact[];
+  period: EvidenceReference<string> | null;
+  requiresManualReview: boolean;
+}
+
+function monthFromIndex(value: number) {
+  const year = Math.floor(value / 12);
+  return `${year}-${String((value % 12) + 1).padStart(2, "0")}`;
+}
+
+function inclusiveMonthRange(start: string, end: string) {
+  const values: string[] = [];
+  for (
+    let index = monthIndex(start);
+    index <= monthIndex(end);
+    index += 1
+  ) {
+    values.push(monthFromIndex(index));
+  }
+  return values;
+}
+
+function companyCandidate(cell: SocialSecurityOCRCell) {
+  const text = cell.rawText.trim();
+  if (
+    text.length < 4 ||
+    /^(?:单位|单位名称|单位全称|参保单位|缴费单位|公司名称)$/u.test(text) ||
+    /参保险种|缴费基数|缴费状态|养老保险|工伤保险|失业保险/u.test(text) ||
+    /^\d+(?:\.\d+)?$/u.test(text)
+  ) {
+    return false;
+  }
+  return /公司|集团|事务所|中心|工厂|银行|学校|医院|合作社/u.test(text);
+}
+
+function fullMonthFacts(row: TableRow): GenericMonthFact[] {
+  const result: GenericMonthFact[] = [];
+  for (const cell of row.cells) {
+    const corrected = correctedNumericText(cell.rawText);
+    const matches = [
+      ...corrected.matchAll(
+        /(?:^|[^\d])((?:19|20)\d{2})\s*(?:年|[-/.])?\s*(0?[1-9]|1[0-2])\s*(?:月)?(?=[^\d]|$)/gu,
+      ),
+    ];
+    for (const match of matches) {
+      const rawMatch = match[0].trim().replace(/^[^\d]+|[^\d月]+$/gu, "");
+      const parsed = parseOCRMonthWithTransformations(rawMatch);
+      if (!parsed.value) continue;
+      result.push({
+        value: parsed.value,
+        cell,
+        row,
+        confidence: cell.confidence,
+        transformations:
+          corrected.trim() === rawMatch
+            ? parsed.transformations
+            : [],
+        explicit: true,
+      });
+    }
+  }
+  if (result.length) return result;
+
+  for (let index = 0; index < row.cells.length - 1; index += 1) {
+    const yearCell = row.cells[index];
+    const monthCell = row.cells[index + 1];
+    const year = correctedNumericText(yearCell.rawText).trim();
+    const month = Number(correctedNumericText(monthCell.rawText).trim());
+    if (!/^(?:19|20)\d{2}$/u.test(year) || month < 1 || month > 12) continue;
+    result.push({
+      value: `${year}-${String(month).padStart(2, "0")}`,
+      cell: monthCell,
+      row,
+      confidence:
+        yearCell.confidence === null || monthCell.confidence === null
+          ? null
+          : Math.min(yearCell.confidence, monthCell.confidence),
+      transformations: [],
+      explicit: false,
+    });
+  }
+  return result;
+}
+
+function nearestCompany(
+  month: GenericMonthFact,
+  companies: SocialSecurityOCRCell[],
+) {
+  return [...companies].sort(
+    (left, right) =>
+      Math.abs(left.column - month.cell.column) -
+      Math.abs(right.column - month.cell.column),
+  )[0];
+}
+
+function collectGenericFacts(
+  tableRows: TableRow[],
+  evidence: SocialSecurityCellEvidence[],
+): GenericCompanyFact[] {
+  const grouped = new Map<string, GenericCompanyFact>();
+  for (const row of tableRows) {
+    const companies = row.cells.filter(companyCandidate);
+    const months = fullMonthFacts(row);
+    if (!companies.length || !months.length) continue;
+
+    if (companies.length === 1 && months.length >= 2) {
+      const start = months[0];
+      const end = months.at(-1)!;
+      if (monthIndex(end.value) < monthIndex(start.value)) continue;
+      const company = companies[0];
+      const companyKey = company.rawText.trim();
+      const startEvidence = cellEvidence(evidence, row, start.cell);
+      const endEvidence = cellEvidence(evidence, row, end.cell);
+      const periodEvidenceIds = [
+        startEvidence?.id,
+        endEvidence?.id,
+      ].filter((value): value is string => Boolean(value));
+      const expanded = inclusiveMonthRange(start.value, end.value).map(
+        (value) => ({
+          value,
+          cell: value === end.value ? end.cell : start.cell,
+          row,
+          confidence:
+            start.confidence === null || end.confidence === null
+              ? null
+              : Math.min(start.confidence, end.confidence),
+          transformations: value === start.value
+            ? start.transformations
+            : value === end.value
+              ? end.transformations
+              : [],
+          explicit: value === start.value || value === end.value,
+        }),
+      );
+      const current = grouped.get(companyKey);
+      grouped.set(companyKey, {
+        companyCell: current?.companyCell ?? company,
+        companyRow: current?.companyRow ?? row,
+        months: [...(current?.months ?? []), ...expanded],
+        period: {
+          rawValue: `${start.cell.rawText}/${end.cell.rawText}`,
+          value: `${start.value}/${end.value}`,
+          evidenceIds: [...new Set(periodEvidenceIds)],
+          transformations: [
+            ...start.transformations,
+            ...end.transformations,
+          ],
+        },
+        // Expanded interior months are deterministic derived facts, but the
+        // current Evidence Gate requires every paid month in the source quote.
+        requiresManualReview: true,
+      });
+      continue;
+    }
+
+    for (const month of months) {
+      const company = nearestCompany(month, companies);
+      if (!company) continue;
+      const companyKey = company.rawText.trim();
+      const current = grouped.get(companyKey);
+      grouped.set(companyKey, {
+        companyCell: current?.companyCell ?? company,
+        companyRow: current?.companyRow ?? row,
+        months: [...(current?.months ?? []), month],
+        period: current?.period ?? null,
+        requiresManualReview:
+          Boolean(current?.requiresManualReview) || !month.explicit,
+      });
+    }
+  }
+  return [...grouped.values()];
+}
+
 export class GenericSocialSecurityParser implements SocialSecurityTableParser {
   parse(input: SocialSecurityParserInput): SocialSecurityParseResult;
   parse(ocr: SocialSecurityOCRResult, sourceFile: string): SocialSecurityParseResult;
@@ -859,68 +1039,139 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
   ): SocialSecurityParseResult {
     const unpacked = unpackInput(input, sourceFile);
     const detected = new SocialSecurityTemplateDetector().detect(unpacked.ocr);
-    if (detected !== "GENERIC" || !tableTopologyValid(unpacked.ocr)) {
+    if (!tableTopologyValid(unpacked.ocr)) {
       return {
-        template: "UNKNOWN",
+        template: detected,
         status: "manual-required",
         autoVerifiable: false,
         records: [],
         rawRecords: [],
-        reasons: [
-          detected === "GENERIC"
-            ? "TABLE_CELL_ORDER_CONFLICT"
-            : "TEMPLATE_UNKNOWN",
-          "MANUAL_REVIEW_REQUIRED",
-        ],
+        reasons: ["TABLE_CELL_ORDER_CONFLICT", "MANUAL_REVIEW_REQUIRED"],
       };
     }
     const evidence = evidenceForInput(unpacked);
+    const parsedRecords: ParsedSocialSecurityRecord[] = [];
     const rawRecords: SocialSecurityRawRecord[] = [];
-    for (const header of rows(unpacked.ocr)) {
-      const columns = headerColumns(header, GENERIC_HEADERS);
-      if (!columns.has("company") || !columns.has("month")) continue;
-      for (const row of followingRows(rows(unpacked.ocr), header)) {
-        const companyCell = cellAt(row, columns.get("company"));
-        const monthCell = cellAt(row, columns.get("month"));
-        const month = parseOCRMonthWithTransformations(monthCell?.rawText ?? "");
-        if (!companyCell?.rawText.trim() || !month.value) continue;
-        const companyEvidence = cellEvidence(evidence, row, companyCell);
-        const monthEvidence = cellEvidence(evidence, row, monthCell);
-        rawRecords.push({
-          companyRaw: reference(
-            companyCell.rawText,
-            companyCell.rawText,
-            companyEvidence,
-          ),
-          companyNormalized: normalizeCompanyName(companyCell.rawText),
-          unitCode: null,
-          monthlyRecords: [],
-          paidMonths: [month.value],
-          rawPeriod: null,
-          derivedPaidMonths: null,
+    const facts = collectGenericFacts(rows(unpacked.ocr), evidence);
+    for (const fact of facts) {
+      const paidMonths = [...new Set(fact.months.map((month) => month.value))].sort(
+        (left, right) => monthIndex(left) - monthIndex(right),
+      );
+      if (!paidMonths.length) continue;
+      const derived = derivePaidMonthFacts(paidMonths);
+      const sourceRows = [...new Set(fact.months.map((month) => month.row))];
+      const confidenceValues = [
+        fact.companyCell.confidence,
+        ...fact.months.map((month) => month.confidence),
+      ].filter((value): value is number => value !== null);
+      const minimumConfidence = confidenceValues.length
+        ? Math.min(...confidenceValues)
+        : null;
+      const companyEvidence = cellEvidence(
+        evidence,
+        fact.companyRow,
+        fact.companyCell,
+      );
+      const monthlyRecords: SocialSecurityMonthlyRecord[] = fact.months
+        .filter((month) => month.explicit)
+        .map((month) => {
+          const monthEvidence = cellEvidence(
+            evidence,
+            month.row,
+            month.cell,
+          );
+          return {
+            month: reference(
+              month.cell.rawText,
+              month.value,
+              monthEvidence,
+              month.transformations,
+            ),
+            unitCode: reference(null, null, null),
+            companyRaw: reference(
+              fact.companyCell.rawText,
+              fact.companyCell.rawText,
+              companyEvidence,
+            ),
+            pension: null,
+            medical: null,
+            injury: null,
+            unemployment: null,
+            maternity: null,
+            evidenceIds: [companyEvidence?.id, monthEvidence?.id].filter(
+              (value): value is string => Boolean(value),
+            ),
+          };
+        });
+      const evidenceIds = [
+        companyEvidence?.id,
+        ...monthlyRecords.flatMap((record) => record.evidenceIds),
+      ].filter((value): value is string => Boolean(value));
+      const rawRecord: SocialSecurityRawRecord = {
+        companyRaw: reference(
+          fact.companyCell.rawText,
+          fact.companyCell.rawText,
+          companyEvidence,
+        ),
+        companyNormalized: normalizeCompanyName(fact.companyCell.rawText),
+        unitCode: null,
+        monthlyRecords,
+        paidMonths,
+        rawPeriod: fact.period,
+        derivedPaidMonths: fact.period ? paidMonths : null,
+        pensionMonths: null,
+        medicalMonths: null,
+        injuryMonths: null,
+        unemploymentMonths: null,
+        maternityMonths: null,
+        derived,
+        evidenceIds,
+        status: fact.requiresManualReview ? "UNCERTAIN" : "PARSED",
+        warnings: fact.requiresManualReview
+          ? ["GENERIC_STRUCTURE_REQUIRES_REVIEW"]
+          : [],
+      };
+      rawRecords.push(rawRecord);
+      parsedRecords.push({
+        companyRaw: fact.companyCell.rawText,
+        companyNormalized: normalizeCompanyName(fact.companyCell.rawText),
+        startMonth: derived.startMonth!,
+        endMonth: derived.endMonth!,
+        paidMonths,
+        pensionMonths: null,
+        injuryMonths: null,
+        unemploymentMonths: null,
+        fieldConfidence: {
+          company: fact.companyCell.confidence,
+          startMonth: minimumConfidence,
+          endMonth: minimumConfidence,
+          paidMonths: fact.requiresManualReview ? null : minimumConfidence,
           pensionMonths: null,
-          medicalMonths: null,
           injuryMonths: null,
           unemploymentMonths: null,
-          maternityMonths: null,
-          derived: derivePaidMonthFacts([month.value]),
-          evidenceIds: [companyEvidence?.id, monthEvidence?.id].filter(
-            (value): value is string => Boolean(value),
-          ),
-          status: "UNCERTAIN",
-          warnings: ["GENERIC_TEMPLATE_REQUIRES_REVIEW"],
-        });
-      }
+        },
+        source: combinedSource(
+          unpacked.sourceFile,
+          [fact.companyRow, ...sourceRows],
+        ),
+        rawRecord,
+      });
     }
+    const autoVerifiable =
+      parsedRecords.length > 0 &&
+      rawRecords.every((record) => record.status === "PARSED");
     return {
-      template: "GENERIC",
-      status: "manual-required",
-      autoVerifiable: false,
-      records: [],
+      template: detected,
+      status: autoVerifiable ? "parsed" : "manual-required",
+      autoVerifiable,
+      records: parsedRecords,
       rawRecords,
-      reasons: rawRecords.length
-        ? ["GENERIC_TEMPLATE_REQUIRES_REVIEW"]
-        : ["PARSER_FAILED"],
+      reasons: parsedRecords.length
+        ? [
+            `TEMPLATE_HINT:${detected}`,
+            ...(autoVerifiable ? [] : ["GENERIC_STRUCTURE_REQUIRES_REVIEW"]),
+          ]
+        : ["PARSER_FAILED", `TEMPLATE_HINT:${detected}`],
     };
   }
 }
@@ -928,21 +1179,5 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
 export function parseSocialSecurityTable(
   input: SocialSecurityParserInput,
 ): SocialSecurityParseResult {
-  switch (detectSocialSecurityTemplate(input.ocr)) {
-    case "SHENZHEN":
-      return new ShenzhenSocialSecurityParser().parse(input);
-    case "GUANGDONG":
-      return new GuangdongSocialSecurityParser().parse(input);
-    case "GENERIC":
-      return new GenericSocialSecurityParser().parse(input);
-    default:
-      return {
-        template: "UNKNOWN",
-        status: "manual-required",
-        autoVerifiable: false,
-        records: [],
-        rawRecords: [],
-        reasons: ["TEMPLATE_UNKNOWN", "MANUAL_REVIEW_REQUIRED"],
-      };
-  }
+  return new GenericSocialSecurityParser().parse(input);
 }

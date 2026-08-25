@@ -31,6 +31,52 @@ export type SocialSecurityOCRMetric = {
 };
 export type TableOCRMetric = SocialSecurityOCRMetric;
 
+export function hasUsableSocialSecurityTable(
+  result: SocialSecurityOCRResult,
+): boolean {
+  return result.tables.some((table) => {
+    const nonEmptyCells = table.cells.filter((cell) => cell.rawText.trim());
+    const rowCount = new Set(nonEmptyCells.map((cell) => cell.row)).size;
+    const columnCount = new Set(nonEmptyCells.map((cell) => cell.column)).size;
+    return nonEmptyCells.length >= 2 && rowCount >= 1 && columnCount >= 2;
+  });
+}
+
+/**
+ * Social-security pages always try Table OCR first. Classification remains
+ * metadata only and cannot prevent a supported page from reaching Table OCR.
+ */
+export async function recognizeSocialSecurityPageTableFirst(input: {
+  provider: SocialSecurityOCRProvider;
+  data: Buffer;
+  mimeType: string;
+  page?: number;
+}): Promise<{
+  selected: SocialSecurityOCRResult;
+  attempts: SocialSecurityOCRResult[];
+  fallbackUsed: boolean;
+}> {
+  const page = input.page ?? 1;
+  const table = await input.provider.recognizeTable(
+    input.data,
+    input.mimeType,
+    page,
+  );
+  if (hasUsableSocialSecurityTable(table)) {
+    return { selected: table, attempts: [table], fallbackUsed: false };
+  }
+  const general = await input.provider.recognizeGeneral(
+    input.data,
+    input.mimeType,
+    page,
+  );
+  return {
+    selected: general,
+    attempts: [table, general],
+    fallbackUsed: true,
+  };
+}
+
 export class SocialSecurityOCRError extends Error {
   constructor(
     public readonly code: SocialSecurityOCRErrorCode,

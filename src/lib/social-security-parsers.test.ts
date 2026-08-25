@@ -342,8 +342,8 @@ describe("Guangdong social-security parser", () => {
   });
 });
 
-describe("unknown templates", () => {
-  it("never emits automatically verifiable records", () => {
+describe("template hints and generic extraction", () => {
+  it("fails closed when OCR contains no structured facts, not merely because template is unknown", () => {
     const input = ocr("某地参保证明 自由格式", []);
     const direct = new GenericSocialSecurityParser().parse(input, "unknown.pdf");
     const selected = parseSocialSecurityTable({
@@ -353,15 +353,17 @@ describe("unknown templates", () => {
 
     expect(detectSocialSecurityTemplate(input)).toBe("UNKNOWN");
     expect(direct).toMatchObject({
+      template: "UNKNOWN",
       status: "manual-required",
       autoVerifiable: false,
       records: [],
       rawRecords: [],
+      reasons: ["PARSER_FAILED", "TEMPLATE_HINT:UNKNOWN"],
     });
     expect(selected).toEqual(direct);
   });
 
-  it("keeps explicit generic columns uncertain and does not guess fields", () => {
+  it("extracts explicit company and monthly cells without a province parser", () => {
     const input = ocr("单位名称 缴费月份", [
       table("generic", [
         cell("单位名称", 0, 0),
@@ -376,17 +378,131 @@ describe("unknown templates", () => {
     });
     expect(result).toMatchObject({
       template: "GENERIC",
-      status: "manual-required",
-      autoVerifiable: false,
-      records: [],
+      status: "parsed",
+      autoVerifiable: true,
+      records: [
+        {
+          companyRaw: "某科技公司",
+          paidMonths: ["2024-01"],
+        },
+      ],
       rawRecords: [
         {
           companyRaw: { value: "某科技公司" },
           paidMonths: ["2024-01"],
-          status: "UNCERTAIN",
-          warnings: ["GENERIC_TEMPLATE_REQUIRES_REVIEW"],
+          status: "PARSED",
+          warnings: [],
         },
       ],
+    });
+  });
+});
+
+describe("[anonymized real-layout regression] Generic Structured Extractor", () => {
+  it("extracts Jiangsu-style year/month rows and safely marks split date cells for review", () => {
+    const input = ocr("社会保险权益记录单 年 月 单位全称", [
+      table("jiangsu-layout", [
+        cell("年", 0, 0),
+        cell("月", 0, 1),
+        cell("单位全称", 0, 2),
+        cell("2020", 1, 0),
+        cell("07", 1, 1),
+        cell("匿名数据技术有限公司", 1, 2),
+        cell("2020", 2, 0),
+        cell("08", 2, 1),
+        cell("匿名数据技术有限公司", 2, 2),
+      ]),
+    ]);
+
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "Candidate-03-jiangsu.pdf",
+    });
+
+    expect(result.records).toMatchObject([
+      {
+        companyRaw: "匿名数据技术有限公司",
+        startMonth: "2020-07",
+        endMonth: "2020-08",
+        paidMonths: ["2020-07", "2020-08"],
+      },
+    ]);
+    expect(result).toMatchObject({
+      template: "UNKNOWN",
+      status: "manual-required",
+      autoVerifiable: false,
+    });
+  });
+
+  it("extracts Hubei-style left/right monthly columns by nearest company cell", () => {
+    const input = ocr("近36个月参保缴费情况 记录月份 单位名称", [
+      table("hubei-layout", [
+        cell("记录月份", 0, 0),
+        cell("单位名称", 0, 1),
+        cell("记录月份", 0, 4),
+        cell("单位名称", 0, 5),
+        cell("202310", 1, 0),
+        cell("匿名甲科技有限公司", 1, 1),
+        cell("202208", 1, 4),
+        cell("匿名乙科技有限公司", 1, 5),
+        cell("202309", 2, 0),
+        cell("匿名甲科技有限公司", 2, 1),
+        cell("202207", 2, 4),
+        cell("匿名乙科技有限公司", 2, 5),
+      ]),
+    ]);
+
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "Candidate-03-hubei.pdf",
+    });
+
+    expect(result.autoVerifiable).toBe(true);
+    expect(result.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          companyRaw: "匿名甲科技有限公司",
+          paidMonths: ["2023-09", "2023-10"],
+        }),
+        expect.objectContaining({
+          companyRaw: "匿名乙科技有限公司",
+          paidMonths: ["2022-07", "2022-08"],
+        }),
+      ]),
+    );
+  });
+
+  it("deterministically expands Guangdong-style explicit periods without inventing gaps", () => {
+    const input = ocr("参保起止时间 单位 养老 工伤 失业", [
+      table("guangdong-layout", [
+        cell("参保起止时间", 0, 0),
+        cell("单位", 0, 2),
+        cell("202212", 1, 0),
+        cell("202302", 1, 1),
+        cell("匿名人力资源有限公司", 1, 2),
+      ]),
+    ]);
+
+    const result = parseSocialSecurityTable({
+      ocr: input,
+      sourceFile: "Candidate-02-guangdong.pdf",
+    });
+
+    expect(result.records).toMatchObject([
+      {
+        companyRaw: "匿名人力资源有限公司",
+        startMonth: "2022-12",
+        endMonth: "2023-02",
+        paidMonths: ["2022-12", "2023-01", "2023-02"],
+      },
+    ]);
+    expect(result).toMatchObject({
+      status: "manual-required",
+      autoVerifiable: false,
+    });
+    expect(result.rawRecords[0]).toMatchObject({
+      derivedPaidMonths: ["2022-12", "2023-01", "2023-02"],
+      status: "UNCERTAIN",
     });
   });
 });

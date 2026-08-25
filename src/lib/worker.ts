@@ -24,6 +24,7 @@ import {
 import {
   AliyunSocialSecurityOCRProvider,
   CachedSocialSecurityOCRProvider,
+  recognizeSocialSecurityPageTableFirst,
   SocialSecurityOCRError,
 } from "./social-security-provider";
 import type {
@@ -296,10 +297,11 @@ function generalOCR(task: TaskRow): OCRProvider {
   };
 }
 
-async function tableOCR(
+async function socialSecurityPageOCR(
   task: TaskRow,
   documentId: string,
   input: Buffer,
+  mimeType: string,
   page: number,
 ): Promise<SocialSecurityOCRResult> {
   let prepared = input;
@@ -314,9 +316,16 @@ async function tableOCR(
     }
   }
   const provider = socialSecurityOCRProvider(task, documentId, page);
-  const result = await provider.recognizeTable(prepared, "image/png", page);
-  persistSocialSecurityOCRResult({ taskId: task.id, documentId, result });
-  return result;
+  const outcome = await recognizeSocialSecurityPageTableFirst({
+    provider,
+    data: prepared,
+    mimeType,
+    page,
+  });
+  for (const result of outcome.attempts) {
+    persistSocialSecurityOCRResult({ taskId: task.id, documentId, result });
+  }
+  return outcome.selected;
 }
 
 function socialSecurityOCRProvider(
@@ -381,19 +390,6 @@ function socialSecurityOCRProvider(
   );
 }
 
-async function generalSocialSecurityOCR(
-  task: TaskRow,
-  documentId: string,
-  input: Buffer,
-  mimeType: string,
-  page: number,
-) {
-  const provider = socialSecurityOCRProvider(task, documentId, page);
-  const result = await provider.recognizeGeneral(input, mimeType, page);
-  persistSocialSecurityOCRResult({ taskId: task.id, documentId, result });
-  return result;
-}
-
 async function estimateOCRCalls(
   files: FileRow[],
   pdfAnalyses: ReadonlyMap<string, DocumentAnalysis>,
@@ -414,21 +410,13 @@ async function estimateOCRCalls(
     if (!analysis) throw new Error("PDF_PARSE_FAILED: 缺少已缓存的 PDF 提取结果");
     if (file.kind === "SOCIAL_SECURITY") {
       count += analysis.pages.reduce((total, page) => {
-        const classification = classifier.classify({
+        classifier.classify({
           mimeType: file.mime_type,
           text: page.localText,
           source: "PDF_TEXT",
         });
-        return (
-          total +
-          (classification.pageType === "PLAIN_TEXT"
-            ? 0
-            : classification.pageType === "TABLE"
-              ? 1
-              : classification.pageType === "SCANNED_UNKNOWN"
-                ? 2
-                : 0)
-        );
+        // Reserve for Table OCR plus a possible General OCR fallback.
+        return total + 2;
       }, 0);
     } else {
       count += analysis.estimatedOCRCalls;
@@ -550,53 +538,14 @@ async function extractOCRStage(
             fileDocumentPages.push(documentPage);
             continue;
           }
-          let result: SocialSecurityOCRResult;
-          if (classification.pageType === "PLAIN_TEXT" && page.localText) {
-            result = {
-              page: page.page,
-              rawText: page.localText,
-              tables: [],
-              requestId: null,
-              provider: "local-pdftotext",
-              providerVersion: "poppler",
-              apiType: "GENERAL",
-              ocrVersion: DOCUMENT_EXTRACTION_VERSION,
-              contentHash: contentHash(page.localText),
-              rawProviderResponseRef: null,
-            };
-          } else {
-            const image = await renderPdfPage(path, page.page);
-            if (classification.pageType === "TABLE") {
-              result = await tableOCR(
-                task,
-                file.document_id,
-                image,
-                page.page,
-              );
-            } else {
-              const general = await generalSocialSecurityOCR(
-                task,
-                file.document_id,
-                image,
-                "image/png",
-                page.page,
-              );
-              const preview = socialPageClassifier.classify({
-                mimeType: file.mime_type,
-                text: general.rawText,
-                source: "GENERAL_OCR_PREVIEW",
-              });
-              result =
-                preview.pageType === "TABLE"
-                  ? await tableOCR(
-                      task,
-                      file.document_id,
-                      image,
-                      page.page,
-                    )
-                  : general;
-            }
-          }
+          const image = await renderPdfPage(path, page.page);
+          const result = await socialSecurityPageOCR(
+            task,
+            file.document_id,
+            image,
+            "image/png",
+            page.page,
+          );
           const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
           const confidences = result.tables
             .map((table) => table.confidence)
@@ -624,13 +573,15 @@ async function extractOCRStage(
                   ? 0
                   : Math.round(confidence * 100),
             ocrConfidence: confidence,
-            warnings:
-              result.provider === "local-pdftotext"
-                ? classification.reasons
-                : confidence !== null &&
-                    confidence >= config.OCR_MIN_CONFIDENCE
+            warnings: [
+              ...classification.reasons.map(
+                (reason) => `CLASSIFIER_HINT:${reason}`,
+              ),
+              ...(confidence !== null &&
+              confidence >= config.OCR_MIN_CONFIDENCE
                 ? []
-                : ["OCR_CONFIDENCE_LOW"],
+                : ["OCR_CONFIDENCE_LOW"]),
+            ],
           };
           pages.push(documentPage);
           fileDocumentPages.push(documentPage);
@@ -639,22 +590,13 @@ async function extractOCRStage(
         }
       });
     } else {
-      const general = await generalSocialSecurityOCR(
+      const result = await socialSecurityPageOCR(
         task,
         file.document_id,
         data,
         file.mime_type,
         1,
       );
-      const preview = socialPageClassifier.classify({
-        mimeType: file.mime_type,
-        text: general.rawText,
-        source: "GENERAL_OCR_PREVIEW",
-      });
-      const result =
-        preview.pageType === "TABLE"
-          ? await tableOCR(task, file.document_id, data, 1)
-          : general;
       const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
       const confidences = result.tables
         .map((table) => table.confidence)
@@ -738,7 +680,7 @@ function monthsEvidence(
 
 function convertParsedRecord(
   record: ParsedSocialSecurityRecord,
-  template: "shenzhen" | "guangdong",
+  template: "shenzhen" | "guangdong" | "generic",
 ): SocialSecurityEvidenceRecord {
   const statusFor = (confidence: number | null) =>
     confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
@@ -855,7 +797,7 @@ function unsupportedSocialRecord(
     endMonth: monthEvidence(null, record, "unsupported"),
     paidMonths: monthsEvidence(null, record, "unsupported"),
     template: "generic",
-    warnings: ["TEMPLATE_UNKNOWN"],
+    warnings: ["PARSER_FAILED"],
   };
 }
 
@@ -967,7 +909,7 @@ async function structureStage(
       ocr: merged,
       sourceFile,
     });
-    if (parsed.template === "UNKNOWN" || !parsed.records.length) {
+    if (!parsed.records.length) {
       social.push(
         unsupportedSocialRecord(
           sourceFile,
@@ -976,28 +918,29 @@ async function structureStage(
         ),
       );
       issues.push({
-        code: "TEMPLATE_UNKNOWN",
-        field: "socialSecurityTemplate",
+        code: "EXTRACTION_UNSUPPORTED",
+        field: "socialSecurityStructure",
         sourceFile,
         sourcePage: merged.page,
-        message: parsed.reasons.join("；") || "未知社保模板，必须人工复核",
+        message: parsed.reasons.join("；") || "社保字段无法从 OCR 结构中定位",
       });
       continue;
     }
     const converted = parsed.records.map((record) =>
-      convertParsedRecord(
-        record,
-        parsed.template === "SHENZHEN" ? "shenzhen" : "guangdong",
-      ),
+      convertParsedRecord(record, "generic"),
     );
     if (!parsed.autoVerifiable) {
-      converted.forEach((record) => record.warnings.push("TEMPLATE_INCOMPLETE"));
+      converted.forEach((record) =>
+        record.warnings.push("GENERIC_STRUCTURE_REQUIRES_REVIEW"),
+      );
       issues.push({
-        code: "TEMPLATE_UNKNOWN",
-        field: "socialSecurityTemplate",
+        code: "EXTRACTION_UNSUPPORTED",
+        field: "socialSecurityStructure",
         sourceFile,
         sourcePage: merged.page,
-        message: parsed.reasons.join("；") || "社保模板字段不完整，必须人工复核",
+        message:
+          parsed.reasons.join("；") ||
+          "通用结构提取结果缺少可自动验证的逐月 Evidence",
       });
     }
     social.push(...converted);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AliyunSocialSecurityOCRProvider,
   CachedSocialSecurityOCRProvider,
+  recognizeSocialSecurityPageTableFirst,
   socialSecurityOCRCacheKey,
   type OCRPageCacheIdentity,
   type OCRPageCacheStore,
@@ -44,6 +45,102 @@ class MemoryCache implements OCRPageCacheStore {
 }
 
 describe("social-security OCR provider", () => {
+  it("routes every supported social-security page to Table OCR first", async () => {
+    const calls: string[] = [];
+    const tableResult: SocialSecurityOCRResult = {
+      ...result("TABLE", 1),
+      tables: [
+        {
+          id: "table",
+          page: 1,
+          cells: [
+            {
+              id: "company",
+              rawText: "单位名称",
+              text: "单位名称",
+              row: 0,
+              column: 0,
+              rowSpan: 1,
+              columnSpan: 1,
+              confidence: 0.99,
+              bbox: null,
+              polygon: null,
+            },
+            {
+              id: "month",
+              rawText: "缴费月份",
+              text: "缴费月份",
+              row: 0,
+              column: 1,
+              rowSpan: 1,
+              columnSpan: 1,
+              confidence: 0.99,
+              bbox: null,
+              polygon: null,
+            },
+          ],
+          confidence: 0.99,
+          provider: "mock-cloud",
+          providerVersion: "2026-08",
+          ocrVersion: "mock-v1",
+          contentHash: "content",
+          rawProviderResponseRef: "request-1",
+        },
+      ],
+    };
+    const provider: SocialSecurityOCRProvider = {
+      provider: "mock-cloud",
+      providerVersion: "2026-08",
+      ocrVersion: "mock-v1",
+      async recognizeTable() {
+        calls.push("TABLE");
+        return tableResult;
+      },
+      async recognizeGeneral() {
+        calls.push("GENERAL");
+        return result("GENERAL", 1);
+      },
+    };
+
+    const outcome = await recognizeSocialSecurityPageTableFirst({
+      provider,
+      data: Buffer.from("page"),
+      mimeType: "image/png",
+    });
+
+    expect(calls).toEqual(["TABLE"]);
+    expect(outcome.selected.apiType).toBe("TABLE");
+    expect(outcome.fallbackUsed).toBe(false);
+  });
+
+  it("falls back to General OCR only when Table OCR has no usable table", async () => {
+    const calls: string[] = [];
+    const provider: SocialSecurityOCRProvider = {
+      provider: "mock-cloud",
+      providerVersion: "2026-08",
+      ocrVersion: "mock-v1",
+      async recognizeTable(_input, _mimeType, page = 1) {
+        calls.push("TABLE");
+        return result("TABLE", page);
+      },
+      async recognizeGeneral(_input, _mimeType, page = 1) {
+        calls.push("GENERAL");
+        return result("GENERAL", page);
+      },
+    };
+
+    const outcome = await recognizeSocialSecurityPageTableFirst({
+      provider,
+      data: Buffer.from("page"),
+      mimeType: "image/jpeg",
+      page: 2,
+    });
+
+    expect(calls).toEqual(["TABLE", "GENERAL"]);
+    expect(outcome.selected.apiType).toBe("GENERAL");
+    expect(outcome.fallbackUsed).toBe(true);
+  });
+
   it("caches the same page and API type without a second paid call", async () => {
     let tableCalls = 0;
     const delegate: SocialSecurityOCRProvider = {
