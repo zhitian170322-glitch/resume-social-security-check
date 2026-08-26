@@ -5,6 +5,7 @@ import type {
   DisplayEvidenceStatus,
   HumanReview,
   HumanReviewStatus,
+  RecruiterComparisonRow,
   ResultEvidenceDisplay,
   ResultViewItem,
   ResultViewModel,
@@ -25,53 +26,6 @@ const reviewLabels: Record<HumanReviewStatus, string> = {
   REJECTED: "人工已驳回",
 };
 
-function periodText(period: ResultViewItem["resumePeriod"]) {
-  return period ? `${period.startMonth} ～ ${period.endMonth}` : "无";
-}
-
-function evidenceText(item: ResultViewItem) {
-  return [
-    `公司：${item.rawResumeCompanyName ?? item.rawSocialSecurityCompanyName ?? "无法确定"}`,
-    `简历时间：${periodText(item.resumePeriod)}`,
-    `社保时间：${periodText(item.socialSecurityPeriod)}`,
-    `公司匹配：${item.companyMatchLabel}`,
-    `实际缴费：${item.paidMonths.join("、") || "无"}`,
-    `缺失月份：${item.missingMonths.join("、") || "无"}`,
-    `额外月份：${item.extraMonths.join("、") || "无"}`,
-    `断缴月份：${item.gapMonths.join("、") || "无"}`,
-    `结论：${item.statusLabel}`,
-    `说明：${item.description}`,
-    ...item.evidence.map(
-      (evidence) =>
-        `${evidence.field}：${evidence.rawValue ?? "缺失"}\n${evidence.sourceFile} 第 ${evidence.sourcePage} 页\n${evidence.sourceQuote}`,
-    ),
-  ].join("\n");
-}
-
-function MonthChips({
-  title,
-  months,
-  tone = "paid",
-}: {
-  title: string;
-  months: string[];
-  tone?: "paid" | "missing" | "extra";
-}) {
-  if (!months.length) return null;
-  return (
-    <div className="month-group">
-      <strong>{title}</strong>
-      <div className="month-chips">
-        {months.map((month) => (
-          <span className={`month-chip ${tone}`} key={`${title}-${month}`}>
-            {month}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function EvidenceBlock({ evidence }: { evidence: ResultEvidenceDisplay }) {
   return (
     <article className="evidence-block">
@@ -85,17 +39,8 @@ function EvidenceBlock({ evidence }: { evidence: ResultEvidenceDisplay }) {
         <div><dt>原始字段</dt><dd>{evidence.rawValue ?? "—"}</dd></div>
         <div><dt>来源</dt><dd>{evidence.sourceFile} · 第 {evidence.sourcePage} 页</dd></div>
         <div><dt>提取方式</dt><dd>{evidence.extractionMethod}</dd></div>
-        {evidence.confidence !== null && (
-          <div><dt>Provider 置信度</dt><dd>{evidence.confidence.toFixed(2)}</dd></div>
-        )}
       </dl>
       <blockquote>{evidence.sourceQuote || "未保存可展示的原文片段"}</blockquote>
-      {evidence.tableCells.map((cell) => (
-        <p className="cell-location" key={cell.id}>
-          表格 {cell.tableIndex + 1} · 第 {cell.rowIndex + 1} 行 · 第 {cell.columnIndex + 1} 列
-          {cell.bbox ? " · 已保存位置坐标" : ""}
-        </p>
-      ))}
     </article>
   );
 }
@@ -125,64 +70,16 @@ function EvidenceInspector({ item }: { item: ResultViewItem }) {
           <p className="muted">无对应社保 Evidence</p>
         )}
       </div>
-      <div className="evidence-layer">
-        <h4>派生事实</h4>
-        {item.derivedFact ? (
-          <>
-            <p><strong>公司原文：</strong>{item.derivedFact.companyRaw}</p>
-            <p><strong>paidMonths 来源：</strong>{item.derivedFact.paidMonthsSource}</p>
-            <MonthChips title="已验证缴费月份" months={item.derivedFact.paidMonths} />
-          </>
-        ) : (
-          <p className="muted">没有可用于自动核验的 Derived Facts</p>
-        )}
-      </div>
-      <div className="evidence-layer">
-        <h4>核验结果</h4>
-        <p>{item.description}</p>
-        <p><strong>规则：</strong>{item.rules.join("；")}</p>
-        <p><strong>人工复核：</strong>{item.requiresManualReview ? "需要" : "不需要"}</p>
-      </div>
     </div>
   );
 }
 
-function MonthsTimeline({ item }: { item: ResultViewItem }) {
-  const months = Array.from(
-    new Set([...item.paidMonths, ...item.missingMonths, ...item.extraMonths, ...item.gapMonths]),
-  ).sort();
-  if (!months.length) return <p className="muted">没有可展示的月度事实</p>;
-  const years = Array.from(new Set(months.map((month) => month.slice(0, 4))));
-  return (
-    <div className="months-timeline">
-      {years.map((year) => (
-        <div className="timeline-year" key={year}>
-          <strong>{year}</strong>
-          <div className="timeline-months">
-            {months.filter((month) => month.startsWith(year)).map((month) => {
-              const tone = item.gapMonths.includes(month) || item.missingMonths.includes(month)
-                ? "missing"
-                : item.extraMonths.includes(month)
-                  ? "extra"
-                  : "paid";
-              const label = tone === "paid" ? "已验证缴纳" : tone === "extra" ? "额外月份" : "缺失或断缴";
-              return (
-                <span className={`timeline-month ${tone}`} key={month} title={`${month} · ${label}`}>
-                  <i />
-                  <small>{month.slice(5)}</small>
-                </span>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-      <div className="timeline-legend">
-        <span><i className="paid" />已验证缴纳</span>
-        <span><i className="missing" />缺失 / 断缴</span>
-        <span><i className="extra" />额外月份</span>
-      </div>
-    </div>
-  );
+function rowTone(status: RecruiterComparisonRow["rowStatus"]) {
+  if (status === "PASS") return "pass";
+  if (status === "FAIL" || status === "SOCIAL_ONLY" || status === "RESUME_ONLY") {
+    return "fail";
+  }
+  return "review";
 }
 
 export function EvidenceResultView({
@@ -197,21 +94,14 @@ export function EvidenceResultView({
   const [review, setReview] = useState<HumanReview>(model.humanReview);
   const [reviewNote, setReviewNote] = useState(model.humanReview.reviewNote ?? "");
   const [reviewMessage, setReviewMessage] = useState("");
-  const [selectedId, setSelectedId] = useState(model.items[0]?.id ?? "");
-  const selected = model.items.find((item) => item.id === selectedId) ?? model.items[0];
-  const reviewFields =
-    selected?.businessResult.comparison.reviewRequiredFields ?? [];
-  const reviewFieldLabel = (field: string) =>
-    ({
-      "resume.companyRaw": "简历公司名称",
-      "resume.position": "简历职位",
-      "resume.startMonth": "简历开始时间",
-      "resume.endMonth": "简历结束时间",
-      "social.companyRaw": "社保公司名称",
-      "social.startMonth": "社保开始时间",
-      "social.endMonth": "社保结束时间",
-      "social.paidMonths": "实际缴纳月份",
-    })[field] ?? field;
+  const [selectedId, setSelectedId] = useState(model.recruiterTable[0]?.id ?? "");
+  const selectedRow =
+    model.recruiterTable.find((row) => row.id === selectedId) ??
+    model.recruiterTable[0];
+  const selected =
+    model.items.find((item) => item.id === selectedRow?.id) ?? model.items[0];
+  const summary = model.recruiterSummary;
+  const totals = model.recruiterTotals;
 
   async function saveReview(reviewStatus: HumanReviewStatus) {
     setReviewMessage("正在保存…");
@@ -231,148 +121,194 @@ export function EvidenceResultView({
 
   return (
     <>
-    <section className={`mobile-result-summary result-hero conclusion-${model.machineResult.conclusion.toLowerCase()}`}>
-      <div className="result-icon" aria-hidden="true">{model.machineResult.conclusion === "CONSISTENT" ? "✓" : "!"}</div>
-      <div>
-        <p className="eyebrow">机器核验结果</p>
-        <div className="verdict">{model.machineResult.label}</div>
-        <p>{model.trustStatus.label} · 系统只陈述材料事实</p>
-      </div>
-    </section>
-    <div className="result-workspace">
-      <aside className="experiences-pane">
-        <div className="pane-heading">
-          <span>工作经历</span>
-          <small>{model.items.length}</small>
+      <section className={`result-hero recruiter-hero conclusion-${summary.conclusion.toLowerCase()}`}>
+        <div className="result-icon" aria-hidden="true">
+          {summary.conclusion === "PASS" ? "✓" : "!"}
         </div>
-        <div className="experience-nav">
-          {model.items.map((item, index) => (
-            <button
-              className={item.id === selected?.id ? "selected" : ""}
-              key={item.id}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <span className="experience-index">{String(index + 1).padStart(2, "0")}</span>
-              <strong>{item.rawResumeCompanyName || item.rawSocialSecurityCompanyName || "无法确定公司"}</strong>
-              <small>{periodText(item.resumePeriod ?? item.socialSecurityPeriod)}</small>
-              <span className={item.matchStatus === "EXACT_MATCH" ? "nav-state success" : "nav-state warning"}>
-                {item.matchStatus === "EXACT_MATCH" ? "✓" : "⚠"} {item.statusLabel}
-              </span>
-            </button>
+        <div>
+          <p className="eyebrow">核验结果</p>
+          <div className="verdict">{summary.headline}</div>
+          {summary.detailLines.map((line) => (
+            <p key={line}>{line}</p>
           ))}
         </div>
-      </aside>
-
-      <section className="verification-pane">
-        <section className={`result-hero conclusion-${model.machineResult.conclusion.toLowerCase()}`}>
-          <div className="result-icon" aria-hidden="true">
-            {model.machineResult.conclusion === "CONSISTENT" ? "✓" : "!"}
-          </div>
-          <div>
-            <p className="eyebrow">机器核验结果</p>
-            <div className="verdict">{model.machineResult.label}</div>
-            <p>系统只陈述材料事实，不判断候选人动机。</p>
-          </div>
-          <div className="trust-row">
-            <span className={`trust-badge ${model.trustStatus.code.toLowerCase()}`}>
-              {model.trustStatus.label}
-            </span>
-          </div>
-        </section>
-        <section className="compact-stats">
-          {[
-            ["简历经历", model.summary.resumeExperienceCount],
-            ["社保单位", model.summary.socialSecurityCompanyCount],
-            ["严格一致", model.summary.exactMatchCount],
-            ["需复核", model.summary.manualReviewCount],
-          ].map(([label, value]) => <div key={label}><strong>{value}</strong><span>{label}</span></div>)}
-        </section>
-        {reviewFields.length > 0 && (
-          <details className="attention-panel">
-            <summary>{reviewFields.length} 个字段需要人工确认</summary>
-            {reviewFields.map((field) => (
-              <p key={field}>{reviewFieldLabel(field)}需要人工确认</p>
-            ))}
-          </details>
-        )}
-        {model.evidenceIssues.length > 0 && (
-          <details className="attention-panel">
-            <summary>技术证据详情（{model.evidenceIssues.length}）</summary>
-            {model.evidenceIssues.map((issue, index) => (
-              <p key={`${issue.field}-${index}`}>{issue.code} · 第 {issue.sourcePage} 页 · {issue.message}</p>
-            ))}
-          </details>
-        )}
-        {selected ? (
-          <article className="verification-card">
-            <div className="experience-title">
-              <div>
-                <small>当前核验记录</small>
-                <h3>{selected.rawResumeCompanyName || selected.rawSocialSecurityCompanyName || "关键字段无法确定"}</h3>
-              </div>
-              <span className={`badge ${selected.matchStatus !== "EXACT_MATCH" ? "warn" : ""}`}>
-                {selected.statusLabel}
-              </span>
-            </div>
-            {selected.specialLabels.length > 0 && (
-              <div className="special-labels">{selected.specialLabels.map((label) => <span key={label}>{label}</span>)}</div>
-            )}
-            <div className="comparison-grid">
-              <section>
-                <small>简历记录</small>
-                <strong>{selected.rawResumeCompanyName ?? "—"}</strong>
-                <span>{periodText(selected.resumePeriod)}</span>
-              </section>
-              <div className="versus">VS</div>
-              <section>
-                <small>社保记录</small>
-                <strong>{selected.rawSocialSecurityCompanyName ?? "—"}</strong>
-                <span>{periodText(selected.socialSecurityPeriod)}</span>
-              </section>
-            </div>
-            <dl className="match-metadata">
-              <div><dt>公司匹配</dt><dd>{selected.companyMatchLabel}</dd></div>
-              <div><dt>核验状态</dt><dd>{selected.statusLabel}</dd></div>
-            </dl>
-            {selected.normalizedCompanyName && (
-              <p className="normalized-hint">辅助标准化：{selected.normalizedCompanyName}（不参与完全一致判定）</p>
-            )}
-            <section className="timeline-section">
-              <div className="section-heading"><h4>月份时间轴</h4><span>仅展示 Engine 输出</span></div>
-              <MonthsTimeline item={selected} />
-            </section>
-            <div className="month-summary">
-              <MonthChips title="实际缴费" months={selected.paidMonths} />
-              <MonthChips title="缺失月份" months={selected.missingMonths} tone="missing" />
-              <MonthChips title="额外月份" months={selected.extraMonths} tone="extra" />
-              <MonthChips title="断缴月份" months={selected.gapMonths} tone="missing" />
-            </div>
-            <p className={selected.matchStatus === "EXACT_MATCH" ? "result-note" : "difference"}>{selected.description}</p>
-            <button className="soft-button" onClick={() => copy(evidenceText(selected))}>复制本条核验依据</button>
-          </article>
-        ) : <div className="empty"><strong>没有可展示的工作经历</strong></div>}
+        <div className="trust-row">
+          <button className="soft-button" onClick={() => copy(summary.fullText)}>
+            复制完整核验结果
+          </button>
+        </div>
       </section>
 
-      <aside className="inspector-pane">
-        <div className="pane-heading">
-          <span>Evidence Inspector</span>
-          <span className={`review-badge ${review.reviewStatus.toLowerCase()}`}>{reviewLabels[review.reviewStatus]}</span>
+      <section className="stat-grid recruiter-totals">
+        {[
+          ["实际缴费", `${totals.actualPaidMonthCount}个月`],
+          ["折算年限", totals.actualPaidDuration],
+          ["公司缴纳", `${totals.companyPaidMonthCount}个月`],
+          ["个人缴纳", `${totals.personalPaidMonthCount}个月`],
+          ["定薪有效缴纳", `${totals.salaryEffectiveMonthCount}个月`],
+          ["核验记录", `${summary.totalRows}段`],
+        ].map(([label, value]) => (
+          <div className="stat" key={label}>
+            <span>{label}</span>
+            <b>{value}</b>
+          </div>
+        ))}
+      </section>
+
+      <section className="table-card recruiter-table-card">
+        <div className="section-heading">
+          <h2>完整核验表</h2>
+          <button className="soft-button" onClick={() => copy(summary.fullText)}>
+            复制完整核验结果
+          </button>
         </div>
-        {selected ? <EvidenceInspector item={selected} /> : <p className="muted">选择一段经历查看证据</p>}
-        <section className="human-review-card">
+        <table>
+          <thead>
+            <tr>
+              <th>序号</th>
+              <th>简历公司</th>
+              <th>职位</th>
+              <th>简历时间</th>
+              <th>社保公司</th>
+              <th>社保时间</th>
+              <th>公司是否一致</th>
+              <th>开始月份差</th>
+              <th>结束月份差</th>
+              <th>该段结果</th>
+              <th>实际社保月数</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {model.recruiterTable.map((row) => (
+              <tr
+                className={`${rowTone(row.rowStatus)} ${row.id === selectedRow?.id ? "selected" : ""}`}
+                key={row.id}
+                onClick={() => setSelectedId(row.id)}
+              >
+                <td>{row.index}</td>
+                <td>{row.resumeCompany}</td>
+                <td>{row.position}</td>
+                <td>{row.resumePeriod}</td>
+                <td>{row.socialCompany}</td>
+                <td>{row.socialPeriod}</td>
+                <td>{row.companyConsistentLabel}</td>
+                <td>{row.startDifferenceLabel}</td>
+                <td>{row.endDifferenceLabel}</td>
+                <td>
+                  <span className={`badge ${row.rowStatus === "PASS" ? "" : "warn"}`}>
+                    {row.rowStatusLabel}
+                  </span>
+                </td>
+                <td>{row.paidMonthLabel}</td>
+                <td>
+                  <div className="table-actions">
+                    <button
+                      className="copy-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void copy(row.itemText);
+                      }}
+                    >
+                      复制该段
+                    </button>
+                    <button
+                      className="copy-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void copy(row.socialStandardText);
+                      }}
+                    >
+                      复制社保信息
+                    </button>
+                    <button
+                      className="copy-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void copy(row.correctionReference);
+                      }}
+                    >
+                      复制修正参考
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      {selectedRow && selected && (
+        <article className="experience-card recruiter-detail-card">
+          <div className="experience-title">
+            <div>
+              <small>第 {selectedRow.index} 段对照</small>
+              <h3>{selectedRow.resumeCompany !== "—" ? selectedRow.resumeCompany : selectedRow.socialCompany}</h3>
+            </div>
+            <span className={`badge ${selectedRow.rowStatus === "PASS" ? "" : "warn"}`}>
+              {selectedRow.rowStatusLabel}
+            </span>
+          </div>
+          <div className="detail-grid">
+            <div className="field">
+              <label>简历公司</label>
+              <p>{selectedRow.resumeCompany}</p>
+            </div>
+            <div className="field">
+              <label>社保公司</label>
+              <p>{selectedRow.socialCompany}</p>
+            </div>
+            <div className="field">
+              <label>职位</label>
+              <p>{selectedRow.position}</p>
+            </div>
+            <div className="field">
+              <label>简历时间</label>
+              <p>{selectedRow.resumePeriod}</p>
+            </div>
+            <div className="field">
+              <label>社保时间</label>
+              <p>{selectedRow.socialPeriod}</p>
+            </div>
+            <div className="field">
+              <label>实际社保月数</label>
+              <p>{selectedRow.paidMonthLabel}</p>
+            </div>
+          </div>
+          <p className={selectedRow.rowStatus === "PASS" ? "result-note" : "difference"}>
+            {selectedRow.reason}
+          </p>
+          <div className="review-actions recruiter-copy-actions">
+            <button className="soft-button" onClick={() => copy(selectedRow.itemText)}>
+              复制该段结果
+            </button>
+            <button className="soft-button" onClick={() => copy(selectedRow.socialStandardText)}>
+              复制社保标准信息
+            </button>
+            <button className="soft-button" onClick={() => copy(selectedRow.correctionReference)}>
+              复制修正参考
+            </button>
+          </div>
+          <details className="evidence-details">
+            <summary>技术证据</summary>
+            <EvidenceInspector item={selected} />
+          </details>
+        </article>
+      )}
+
+      <section className="summary-card human-review-card">
         <div>
           <p className="eyebrow">人工复核</p>
           <h2>{reviewLabels[review.reviewStatus]}</h2>
           <p>机器原始结论：{model.machineResult.label}</p>
-          <p className="review-separation">人工复核不会修改机器原始结论。</p>
-          {review.reviewedAt && <p>复核时间：{new Date(review.reviewedAt).toLocaleString("zh-CN")}</p>}
+          <p className="review-separation">人工复核不会修改机器原始结论，也不会改写简历原文。</p>
         </div>
         <label>
           复核备注
           <textarea
             maxLength={2000}
             onChange={(event) => setReviewNote(event.target.value)}
-            placeholder="记录人工判断依据，不会修改原始 Evidence"
+            placeholder="记录人工判断依据，不会修改原始字段"
             value={reviewNote}
           />
         </label>
@@ -383,8 +319,6 @@ export function EvidenceResultView({
         </div>
         {reviewMessage && <p className="muted">{reviewMessage}</p>}
       </section>
-      </aside>
-    </div>
     </>
   );
 }

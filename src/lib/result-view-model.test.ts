@@ -809,3 +809,279 @@ describe("[synthetic] Phase 9 Result UI mapping", () => {
     );
   });
 });
+
+function monthSequence(start: string, count: number) {
+  const [year, month] = start.split("-").map(Number);
+  return Array.from({ length: count }, (_, index) => {
+    const value = year * 12 + (month - 1) + index;
+    return `${Math.floor(value / 12)}-${String((value % 12) + 1).padStart(2, "0")}`;
+  });
+}
+
+describe("[synthetic] recruiter comparison table", () => {
+  it("keeps every pass, fail, review, resume-only and social-only row visible", () => {
+    const pass = item("EXACT_MATCH");
+    const fail = item("START_MONTH_MISMATCH");
+    fail.rawResumeCompanyName = "深圳中软国际科技服务有限公司";
+    fail.rawSocialSecurityCompanyName = "深圳中软国际科技服务有限公司";
+    fail.resumePeriod = { startMonth: "2020-12", endMonth: "2026-04" };
+    fail.socialSecurityPeriod = { startMonth: "2021-01", endMonth: "2026-04" };
+    fail.companyMatchType = "EXACT";
+    const reviewItem = item("MANUAL_REVIEW_REQUIRED");
+    reviewItem.rawResumeCompanyName = "乙公司";
+    reviewItem.rawSocialSecurityCompanyName = "乙公司";
+    const resumeOnly = item("RESUME_ONLY");
+    resumeOnly.rawSocialSecurityCompanyName = null;
+    resumeOnly.socialSecurityPeriod = null;
+    resumeOnly.companyMatchType = null;
+    resumeOnly.paidMonths = [];
+    const socialOnly = item("SOCIAL_SECURITY_ONLY");
+    socialOnly.rawResumeCompanyName = null;
+    socialOnly.resumePeriod = null;
+    socialOnly.companyMatchType = null;
+    const mapped = buildResultViewModel({
+      taskSchemaVersion: 2,
+      result: (() => {
+        const value = report([pass, fail, reviewItem, resumeOnly, socialOnly]);
+        value.resumeExtraction.experiences = [
+          value.resumeExtraction.experiences[0],
+          {
+            ...value.resumeExtraction.experiences[0],
+            resumeCompany: { ...text("深圳中软国际科技服务有限公司"), extractionMethod: "deepseek" },
+            resumeStartMonth: { ...month("2020-12"), extractionMethod: "deepseek" },
+            resumeEndMonth: { ...month("2026-04"), extractionMethod: "deepseek" },
+          },
+          {
+            ...value.resumeExtraction.experiences[0],
+            resumeCompany: { ...text("乙公司"), extractionMethod: "deepseek" },
+          },
+          {
+            ...value.resumeExtraction.experiences[0],
+            resumeCompany: { ...text("丙公司"), extractionMethod: "deepseek" },
+          },
+        ];
+        value.socialSecurityRecords = [
+          value.socialSecurityRecords[0],
+          {
+            ...value.socialSecurityRecords[0],
+            companyRaw: text("深圳中软国际科技服务有限公司"),
+            startMonth: month("2021-01"),
+            endMonth: month("2026-04"),
+          },
+          {
+            ...value.socialSecurityRecords[0],
+            companyRaw: text("乙公司"),
+          },
+          {
+            ...value.socialSecurityRecords[0],
+            companyRaw: text("丁公司"),
+          },
+        ];
+        return value;
+      })(),
+      verification: {
+        conclusion: "INCONSISTENT",
+        items: [pass, fail, reviewItem, resumeOnly, socialOnly],
+      },
+      derivedFacts: null,
+      validationStage: null,
+      humanReview: review,
+      tableCells: [],
+    });
+    if (mapped.legacy) throw new Error("expected non-legacy model");
+    expect(mapped.recruiterTable.map((row) => row.rowStatus)).toEqual([
+      "PASS",
+      "FAIL",
+      "NEEDS_REVIEW",
+      "RESUME_ONLY",
+      "SOCIAL_ONLY",
+    ]);
+    expect(mapped.recruiterTable).toHaveLength(5);
+    expect(mapped.recruiterTable[1]).toMatchObject({
+      resumeCompany: "深圳中软国际科技服务有限公司",
+      socialCompany: "深圳中软国际科技服务有限公司",
+      resumePeriod: "2020-12 至 2026-04",
+      socialPeriod: "2021-01 至 2026-04",
+      rowStatusLabel: "不通过",
+      reason: "社保开始缴纳时间比简历开始时间晚1个月",
+    });
+    expect(mapped.recruiterSummary).toMatchObject({
+      conclusion: "FAIL",
+      conclusionLabel: "不通过",
+      passCount: 1,
+      failCount: 1,
+      reviewCount: 1,
+      resumeOnlyCount: 1,
+      socialOnlyCount: 1,
+    });
+    expect(mapped.recruiterSummary.fullText).not.toMatch(/所有工作经历完全一致/);
+    expect(mapped.recruiterTable[1].correctionReference).toBe(
+      [
+        "深圳中软国际科技服务有限公司",
+        "Java开发工程师",
+        "2021-01 至 2026-04",
+      ].join("\n"),
+    );
+  });
+
+  it("recalculates 17 + 65 + 3 confirmed months as 85 months and 7年1个月", () => {
+    const companyA = monthSequence("2020-01", 17);
+    const companyB = monthSequence("2021-06", 65);
+    const personal = monthSequence("2026-11", 3);
+    const first = item("EXACT_MATCH");
+    first.rawResumeCompanyName = "甲科技";
+    first.rawSocialSecurityCompanyName = "甲科技";
+    first.paidMonths = companyA;
+    first.resumePeriod = { startMonth: "2020-01", endMonth: "2021-05" };
+    first.socialSecurityPeriod = { startMonth: "2020-01", endMonth: "2021-05" };
+    const second = item("EXACT_MATCH");
+    second.rawResumeCompanyName = "乙科技";
+    second.rawSocialSecurityCompanyName = "乙科技";
+    second.paidMonths = companyB;
+    second.resumePeriod = { startMonth: "2021-06", endMonth: "2026-10" };
+    second.socialSecurityPeriod = { startMonth: "2021-06", endMonth: "2026-10" };
+    const windowItem = item("PERSONAL_INSURANCE");
+    windowItem.rawResumeCompanyName = null;
+    windowItem.resumePeriod = null;
+    windowItem.rawSocialSecurityCompanyName = "社保局个人缴费窗口";
+    windowItem.socialSecurityPeriod = { startMonth: "2026-11", endMonth: "2027-01" };
+    windowItem.paidMonths = personal;
+    windowItem.companyMatchType = null;
+    const mapped = buildResultViewModel({
+      taskSchemaVersion: 2,
+      result: (() => {
+        const value = report([first, second, windowItem]);
+        value.resumeExtraction.experiences = [
+          {
+            ...value.resumeExtraction.experiences[0],
+            resumeCompany: { ...text("甲科技"), extractionMethod: "deepseek" },
+            resumeStartMonth: { ...month("2020-01"), extractionMethod: "deepseek" },
+            resumeEndMonth: { ...month("2021-05"), extractionMethod: "deepseek" },
+          },
+          {
+            ...value.resumeExtraction.experiences[0],
+            resumeCompany: { ...text("乙科技"), extractionMethod: "deepseek" },
+            resumeStartMonth: { ...month("2021-06"), extractionMethod: "deepseek" },
+            resumeEndMonth: { ...month("2026-10"), extractionMethod: "deepseek" },
+          },
+        ];
+        value.socialSecurityRecords = [
+          {
+            ...value.socialSecurityRecords[0],
+            companyRaw: text("甲科技"),
+            startMonth: month("2020-01"),
+            endMonth: month("2021-05"),
+            paidMonths: months(companyA),
+            personalInsurance: false,
+          },
+          {
+            ...value.socialSecurityRecords[0],
+            companyRaw: text("乙科技"),
+            startMonth: month("2021-06"),
+            endMonth: month("2026-10"),
+            paidMonths: months(companyB),
+            personalInsurance: false,
+          },
+          {
+            ...value.socialSecurityRecords[0],
+            companyRaw: text("社保局个人缴费窗口"),
+            startMonth: month("2026-11"),
+            endMonth: month("2027-01"),
+            paidMonths: months(personal),
+            personalInsurance: true,
+          },
+        ];
+        return value;
+      })(),
+      verification: {
+        conclusion: "MANUAL_REVIEW_REQUIRED",
+        items: [first, second, windowItem],
+      },
+      derivedFacts: {
+        versions: {
+          taskSchemaVersion: 2,
+          extractionVersion: "synthetic",
+          ocrVersion: "synthetic",
+          parserVersion: "synthetic",
+          evidenceValidatorVersion: "synthetic",
+          verificationEngineVersion: "synthetic",
+        },
+        socialSecurity: [
+          {
+            companyRaw: "甲科技",
+            companyRawSource: "VALIDATED_RAW_EVIDENCE",
+            companyEvidenceRefs: ["a"],
+            startMonth: "2020-01",
+            endMonth: "2021-05",
+            paidMonths: companyA,
+            paidMonthsSource: "VALIDATED_MONTHLY_EVIDENCE",
+            paidMonthsEvidenceRefs: ["a"],
+          },
+          {
+            companyRaw: "乙科技",
+            companyRawSource: "VALIDATED_RAW_EVIDENCE",
+            companyEvidenceRefs: ["b"],
+            startMonth: "2021-06",
+            endMonth: "2026-10",
+            paidMonths: companyB,
+            paidMonthsSource: "VALIDATED_MONTHLY_EVIDENCE",
+            paidMonthsEvidenceRefs: ["b"],
+          },
+          {
+            companyRaw: "社保局个人缴费窗口",
+            companyRawSource: "VALIDATED_RAW_EVIDENCE",
+            companyEvidenceRefs: ["c"],
+            startMonth: "2026-11",
+            endMonth: "2027-01",
+            paidMonths: personal,
+            paidMonthsSource: "VALIDATED_MONTHLY_EVIDENCE",
+            paidMonthsEvidenceRefs: ["c"],
+          },
+        ],
+      },
+      validationStage: null,
+      humanReview: review,
+      tableCells: [],
+    });
+    if (mapped.legacy) throw new Error("expected non-legacy model");
+    expect(mapped.recruiterTable.map((row) => row.paidMonthCount)).toEqual([
+      17, 65, 3,
+    ]);
+    expect(mapped.recruiterTotals).toMatchObject({
+      companyPaidMonthCount: 82,
+      personalPaidMonthCount: 3,
+      actualPaidMonthCount: 85,
+      salaryEffectiveMonthCount: 82,
+      actualPaidDuration: "7年1个月",
+    });
+    expect(mapped.recruiterSummary.fullText).toContain("实际缴费：85个月");
+    expect(mapped.recruiterSummary.fullText).toContain("折算年限：7年1个月");
+    expect(mapped.recruiterSummary.fullText).not.toMatch(/约7\.08年/);
+    expect(mapped.recruiterTable[2].rowStatus).toBe("NEEDS_REVIEW");
+    expect(mapped.recruiterSummary.conclusion).not.toBe("PASS");
+  });
+
+  it("does not treat an interval-only span as actual paid months", () => {
+    const verificationItem = item("EXACT_MATCH");
+    verificationItem.paidMonths = [];
+    const mapped = model({
+      verificationItem,
+      includeDerivedFacts: false,
+      mutateReport(value) {
+        value.socialSecurityRecords[0].startMonth.value = "2022-12";
+        value.socialSecurityRecords[0].endMonth.value = "2025-04";
+        value.socialSecurityRecords[0].paidMonths = {
+          ...evidenceBase,
+          status: "missing",
+          value: null,
+        };
+      },
+    });
+    if (mapped.legacy) throw new Error("expected non-legacy model");
+    expect(mapped.recruiterTable[0]).toMatchObject({
+      paidMonthCount: null,
+      paidMonthLabel: "无法从材料确定",
+    });
+    expect(mapped.recruiterTotals.actualPaidMonthCount).toBe(0);
+  });
+});

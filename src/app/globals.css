@@ -126,6 +126,9 @@ h2 { margin: 0; font-size: 23px; letter-spacing: -0.4px; }
 .result-hero.conclusion-partially_consistent,
 .result-hero.conclusion-manual_review_required { border-left-color: var(--orange); }
 .result-hero.conclusion-insufficient_evidence { border-left-color: #8e8e93; }
+.result-hero.conclusion-pass { border-left-color: var(--green); }
+.result-hero.conclusion-fail { border-left-color: var(--red); }
+.result-hero.conclusion-needs_review { border-left-color: var(--orange); }
 .result-hero .verdict { font-size: 25px; font-weight: 700; margin: 8px 0; }
 .result-hero p { color: var(--secondary); margin: 6px 0; }
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0 42px; }
@@ -148,6 +151,16 @@ h2 { margin: 0; font-size: 23px; letter-spacing: -0.4px; }
 .month-dot { border-radius: 9px; padding: 7px 9px; background: #eaf8ed; color: #248a3d; font-size: 13px; }
 .month-dot.gap { background: #fff1e7; color: #bc5100; }
 .table-card { margin-top: 28px; padding: 24px; overflow-x: auto; }
+.recruiter-table-card table { min-width: 1280px; }
+.recruiter-table-card tr { cursor: pointer; }
+.recruiter-table-card tr.selected td { background: rgba(8,122,245,.06); }
+.recruiter-table-card tr.fail td { background: rgba(217,54,54,.04); }
+.recruiter-table-card tr.review td { background: rgba(217,119,6,.05); }
+.table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.recruiter-totals { grid-template-columns: repeat(6, 1fr); }
+.recruiter-hero { margin-bottom: 8px; }
+.recruiter-copy-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.recruiter-detail-card { margin-top: 18px; }
 table { width: 100%; border-collapse: collapse; min-width: 900px; }
 th, td { padding: 13px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
 th { color: var(--secondary); font-weight: 600; }
@@ -229,7 +242,7 @@ th { color: var(--secondary); font-weight: 600; }
   .topbar, .result-header { flex-direction: column; }
   .upload-grid { grid-template-columns: 1fr; margin-top: 32px; }
   .upload-card { min-height: 220px; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .stat-grid, .recruiter-totals { grid-template-columns: repeat(2, 1fr); }
   .detail-grid, .summary-list, .evidence-columns { grid-template-columns: 1fr; }
   .experience-facts { grid-template-columns: 1fr; }
   .experience-card { padding: 20px; }
@@ -492,9 +505,12 @@ h2 { font-size: 19px; letter-spacing: -.25px; }
   border-radius: var(--radius-card); background: var(--surface-elevated); box-shadow: var(--shadow-card);
 }
 .result-icon { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 50%; background: rgba(48,161,78,.1); color: var(--success); font-size: 18px; font-weight: 700; }
-.conclusion-inconsistent .result-icon { background: rgba(217,54,54,.08); color: var(--error); }
+.conclusion-inconsistent .result-icon,
+.conclusion-fail .result-icon { background: rgba(217,54,54,.08); color: var(--error); }
 .conclusion-partially_consistent .result-icon,
-.conclusion-manual_review_required .result-icon { background: rgba(217,119,6,.09); color: var(--warning); }
+.conclusion-manual_review_required .result-icon,
+.conclusion-needs_review .result-icon { background: rgba(217,119,6,.09); color: var(--warning); }
+.conclusion-pass .result-icon { background: rgba(48,161,78,.1); color: var(--success); }
 .conclusion-insufficient_evidence .result-icon { background: rgba(152,152,157,.1); color: var(--text-secondary); }
 .result-hero .verdict { margin: 2px 0; font-size: 21px; }
 .result-hero p { margin: 2px 0; font-size: 12px; }

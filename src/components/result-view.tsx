@@ -75,20 +75,12 @@ export function ResultView({ taskId }: { taskId: string }) {
 
   if (!viewModel) return <main className="shell"><div className="empty">正在读取核验结果…</div></main>;
   if (!viewModel.legacy) {
-    const text = [
-      `候选人：${viewModel.candidateName}`,
-      `机器核验结论：${viewModel.machineResult.label}`,
-      `证据状态：${viewModel.trustStatus.label}`,
-      `人工复核：${viewModel.humanReview.reviewStatus}`,
-      ...viewModel.items.map(
-        (item, index) => `${index + 1}. ${item.statusLabel}：${item.description}`,
-      ),
-    ].join("\n");
+    const text = viewModel.recruiterSummary.fullText;
     return (
       <main className="shell result-shell">
         <header className="result-header">
           <div>
-            <p className="eyebrow">可审计核验结果</p>
+            <p className="eyebrow">核验结果</p>
             <h1>{viewModel.candidateName}</h1>
           </div>
           <nav>

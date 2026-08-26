@@ -107,6 +107,7 @@ export type VerificationBusinessResult = {
       paidMonths: DisplayEvidenceStatus;
       statedPaidMonthCount: DisplayEvidenceStatus;
     };
+    personalInsurance: boolean;
   } | null;
   comparison: {
     companyMatch:
@@ -155,6 +156,58 @@ export type ResultViewItem = {
   businessResult: VerificationBusinessResult;
 };
 
+export type RecruiterRowStatus =
+  | "PASS"
+  | "FAIL"
+  | "NEEDS_REVIEW"
+  | "RESUME_ONLY"
+  | "SOCIAL_ONLY";
+
+export type RecruiterComparisonRow = {
+  id: string;
+  index: number;
+  resumeCompany: string;
+  position: string;
+  resumePeriod: string;
+  socialCompany: string;
+  socialPeriod: string;
+  companyConsistentLabel: string;
+  startDifferenceLabel: string;
+  endDifferenceLabel: string;
+  rowStatus: RecruiterRowStatus;
+  rowStatusLabel: string;
+  reason: string;
+  paidMonthCount: number | null;
+  paidMonthLabel: string;
+  personalInsurance: boolean;
+  itemText: string;
+  socialStandardText: string;
+  correctionReference: string;
+};
+
+export type RecruiterTotals = {
+  companyPaidMonthCount: number;
+  personalPaidMonthCount: number;
+  actualPaidMonthCount: number;
+  salaryEffectiveMonthCount: number;
+  actualPaidDuration: string;
+  salaryEffectiveDuration: string;
+};
+
+export type RecruiterSummary = {
+  conclusion: "PASS" | "FAIL" | "NEEDS_REVIEW";
+  conclusionLabel: string;
+  totalRows: number;
+  passCount: number;
+  failCount: number;
+  reviewCount: number;
+  resumeOnlyCount: number;
+  socialOnlyCount: number;
+  headline: string;
+  detailLines: string[];
+  fullText: string;
+};
+
 export type ResultViewModel =
   | {
       schemaVersion: 3;
@@ -177,6 +230,9 @@ export type ResultViewModel =
       humanReview: HumanReview;
       summary: VerificationReportV2["summary"];
       items: ResultViewItem[];
+      recruiterTable: RecruiterComparisonRow[];
+      recruiterTotals: RecruiterTotals;
+      recruiterSummary: RecruiterSummary;
       evidenceIssues: EvidenceIssue[];
     }
   | {
@@ -375,6 +431,442 @@ export function formatPaidDuration(
   if (paidYears === 0) return `${paidRemainingMonths}个月`;
   if (paidRemainingMonths === 0) return `${paidYears}年`;
   return `${paidYears}年${paidRemainingMonths}个月`;
+}
+
+export function formatPaidMonthsAndYears(monthCount: number) {
+  return {
+    monthCount,
+    years: Math.floor(monthCount / 12),
+    remainingMonths: monthCount % 12,
+    duration: formatPaidDuration(
+      Math.floor(monthCount / 12),
+      monthCount % 12,
+    ),
+  };
+}
+
+const PERSONAL_INSURANCE_PATTERN = /个人参保|个人缴费|灵活就业|个人缴费窗口/u;
+const YEAR_MONTH_PATTERN = /^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])$/;
+
+function displayValue(value: string | null | undefined) {
+  return value?.trim() ? value : "—";
+}
+
+function periodLabel(
+  startMonth: string | null | undefined,
+  endMonth: string | null | undefined,
+) {
+  if (!startMonth && !endMonth) return "—";
+  return `${startMonth ?? "待人工确认"} 至 ${endMonth ?? "待人工确认"}`;
+}
+
+function uniqueConfirmedMonths(months: string[]) {
+  return [
+    ...new Set(months.filter((month) => YEAR_MONTH_PATTERN.test(month))),
+  ].sort();
+}
+
+function isPersonalInsuranceRecord(input: {
+  matchStatus: Phase8MatchStatus;
+  socialCompany: string | null;
+  personalInsurance?: boolean;
+}) {
+  return (
+    input.matchStatus === "PERSONAL_INSURANCE" ||
+    input.personalInsurance === true ||
+    PERSONAL_INSURANCE_PATTERN.test(input.socialCompany ?? "")
+  );
+}
+
+function recruiterRowStatus(input: {
+  matchStatus: Phase8MatchStatus;
+  scenario: VerificationBusinessResult["scenario"];
+  companyMatch: VerificationBusinessResult["comparison"]["companyMatch"];
+  startStatus: BusinessMonthStatus;
+  endStatus: BusinessMonthStatus;
+  reviewRequired: boolean;
+  personalInsurance: boolean;
+}): RecruiterRowStatus {
+  if (
+    input.matchStatus === "RESUME_ONLY" ||
+    input.scenario === "RESUME_WITHOUT_SOCIAL_RECORD"
+  ) {
+    return "RESUME_ONLY";
+  }
+  if (
+    input.matchStatus === "SOCIAL_SECURITY_ONLY" ||
+    input.scenario === "UNDECLARED_SOCIAL_RECORD"
+  ) {
+    return "SOCIAL_ONLY";
+  }
+  if (
+    input.personalInsurance ||
+    input.reviewRequired ||
+    input.matchStatus === "MANUAL_REVIEW_REQUIRED" ||
+    input.matchStatus === "INSUFFICIENT_EVIDENCE" ||
+    input.matchStatus === "MULTIPLE_COMPANIES_SAME_MONTH" ||
+    input.companyMatch === "NORMALIZED_MATCH" ||
+    input.companyMatch === "FUZZY_CANDIDATE" ||
+    input.startStatus === "MANUAL_REVIEW_REQUIRED" ||
+    input.endStatus === "MANUAL_REVIEW_REQUIRED"
+  ) {
+    return "NEEDS_REVIEW";
+  }
+  if (
+    input.companyMatch === "NO_MATCH" ||
+    input.startStatus === "SOCIAL_EARLIER" ||
+    input.startStatus === "SOCIAL_LATER" ||
+    input.endStatus === "SOCIAL_EARLY_END" ||
+    input.endStatus === "SOCIAL_LATE_END" ||
+    input.matchStatus === "COMPANY_MISMATCH" ||
+    input.matchStatus === "START_MONTH_MISMATCH" ||
+    input.matchStatus === "END_MONTH_MISMATCH" ||
+    input.matchStatus === "PERIOD_MISMATCH" ||
+    input.matchStatus === "GAP_DETECTED"
+  ) {
+    return "FAIL";
+  }
+  if (
+    input.matchStatus === "EXACT_MATCH" &&
+    input.companyMatch === "EXACT" &&
+    input.startStatus === "MATCH" &&
+    input.endStatus === "MATCH"
+  ) {
+    return "PASS";
+  }
+  return "NEEDS_REVIEW";
+}
+
+const recruiterStatusLabels: Record<RecruiterRowStatus, string> = {
+  PASS: "通过",
+  FAIL: "不通过",
+  NEEDS_REVIEW: "待人工确认",
+  RESUME_ONLY: "社保未体现",
+  SOCIAL_ONLY: "简历未体现",
+};
+
+function companyConsistentLabel(
+  rowStatus: RecruiterRowStatus,
+  companyMatch: VerificationBusinessResult["comparison"]["companyMatch"],
+) {
+  if (rowStatus === "RESUME_ONLY" || rowStatus === "SOCIAL_ONLY") return "—";
+  if (companyMatch === "EXACT") return "一致";
+  if (companyMatch === "NO_MATCH") return "不一致";
+  return "待人工确认";
+}
+
+function startDifferenceLabel(
+  rowStatus: RecruiterRowStatus,
+  status: BusinessMonthStatus,
+  differenceMonths: number | null,
+) {
+  if (rowStatus === "RESUME_ONLY" || rowStatus === "SOCIAL_ONLY") return "—";
+  if (status === "MATCH") return "一致";
+  if (status === "SOCIAL_LATER" && differenceMonths !== null) {
+    return `社保晚${differenceMonths}个月`;
+  }
+  if (status === "SOCIAL_EARLIER" && differenceMonths !== null) {
+    return `社保早${differenceMonths}个月`;
+  }
+  if (status === "MISSING") return "—";
+  return "待人工确认";
+}
+
+function endDifferenceLabel(
+  rowStatus: RecruiterRowStatus,
+  status: BusinessMonthStatus,
+  differenceMonths: number | null,
+) {
+  if (rowStatus === "RESUME_ONLY" || rowStatus === "SOCIAL_ONLY") return "—";
+  if (status === "MATCH") return "一致";
+  if (status === "SOCIAL_EARLY_END" && differenceMonths !== null) {
+    return `社保提前结束${differenceMonths}个月`;
+  }
+  if (status === "SOCIAL_LATE_END" && differenceMonths !== null) {
+    return `社保延后${differenceMonths}个月`;
+  }
+  if (status === "MISSING") return "—";
+  return "待人工确认";
+}
+
+function recruiterReason(input: {
+  rowStatus: RecruiterRowStatus;
+  companyMatch: VerificationBusinessResult["comparison"]["companyMatch"];
+  startStatus: BusinessMonthStatus;
+  endStatus: BusinessMonthStatus;
+  startDifferenceMonths: number | null;
+  endDifferenceMonths: number | null;
+  reviewRequiredFields: string[];
+  gapMonths: string[];
+}) {
+  if (input.rowStatus === "PASS") {
+    return "公司一致，开始时间一致，结束时间一致";
+  }
+  if (input.rowStatus === "RESUME_ONLY") return "该段简历经历未找到对应社保记录";
+  if (input.rowStatus === "SOCIAL_ONLY") return "社保存在简历未体现的缴纳单位";
+  const parts: string[] = [];
+  if (input.companyMatch === "NO_MATCH") parts.push("公司名称不一致");
+  if (input.companyMatch === "NORMALIZED_MATCH" || input.companyMatch === "FUZZY_CANDIDATE") {
+    parts.push("公司名称需要人工确认");
+  }
+  if (input.startStatus === "SOCIAL_LATER" && input.startDifferenceMonths !== null) {
+    parts.push(
+      `社保开始缴纳时间比简历开始时间晚${input.startDifferenceMonths}个月`,
+    );
+  } else if (
+    input.startStatus === "SOCIAL_EARLIER" &&
+    input.startDifferenceMonths !== null
+  ) {
+    parts.push(
+      `社保开始缴纳时间比简历开始时间早${input.startDifferenceMonths}个月`,
+    );
+  } else if (input.startStatus === "MANUAL_REVIEW_REQUIRED") {
+    parts.push("开始时间需要人工确认");
+  }
+  if (input.endStatus === "SOCIAL_EARLY_END" && input.endDifferenceMonths !== null) {
+    parts.push(
+      `社保结束缴纳时间比简历结束时间早${input.endDifferenceMonths}个月`,
+    );
+  } else if (
+    input.endStatus === "SOCIAL_LATE_END" &&
+    input.endDifferenceMonths !== null
+  ) {
+    parts.push(
+      `社保结束缴纳时间比简历结束时间晚${input.endDifferenceMonths}个月`,
+    );
+  } else if (input.endStatus === "MANUAL_REVIEW_REQUIRED") {
+    parts.push("结束时间需要人工确认");
+  }
+  if (input.gapMonths.length) {
+    parts.push(`存在断缴：${input.gapMonths.join("、")}`);
+  }
+  if (input.reviewRequiredFields.length && !parts.length) {
+    parts.push("部分字段需要人工确认");
+  }
+  return parts.join("；") || "记录需要人工确认";
+}
+
+function confirmedPaidMonths(item: ResultViewItem) {
+  if (item.businessResult.social?.paidMonthCount == null) return [];
+  const months = uniqueConfirmedMonths(
+    item.derivedFact?.paidMonths ?? item.paidMonths,
+  );
+  return months.length === item.businessResult.social.paidMonthCount
+    ? months
+    : months;
+}
+
+function buildRecruiterRow(
+  item: ResultViewItem,
+  index: number,
+  candidateName: string,
+): RecruiterComparisonRow {
+  const business = item.businessResult;
+  const personalInsurance = isPersonalInsuranceRecord({
+    matchStatus: item.matchStatus,
+    socialCompany:
+      business.social?.companyRaw ?? item.rawSocialSecurityCompanyName,
+    personalInsurance: business.social?.personalInsurance,
+  });
+  const comparisonReviewFields = business.comparison.reviewRequiredFields.filter(
+    (field) =>
+      ![
+        "resume.position",
+        "social.paidMonths",
+        "social.statedPaidMonthCount",
+      ].includes(field),
+  );
+  const rowStatus = recruiterRowStatus({
+    matchStatus: item.matchStatus,
+    scenario: business.scenario,
+    companyMatch: business.comparison.companyMatch,
+    startStatus: business.comparison.startMonthStatus,
+    endStatus: business.comparison.endMonthStatus,
+    reviewRequired: comparisonReviewFields.length > 0,
+    personalInsurance,
+  });
+  const resumeCompany = displayValue(
+    business.resume?.companyRaw ?? item.rawResumeCompanyName,
+  );
+  const socialCompany = displayValue(
+    business.social?.companyRaw ?? item.rawSocialSecurityCompanyName,
+  );
+  const position = displayValue(business.resume?.position);
+  const resumePeriod = periodLabel(
+    business.resume?.startMonth ?? item.resumePeriod?.startMonth,
+    business.resume?.endMonth ?? item.resumePeriod?.endMonth,
+  );
+  const socialPeriod = periodLabel(
+    business.social?.startMonth ?? item.socialSecurityPeriod?.startMonth,
+    business.social?.endMonth ?? item.socialSecurityPeriod?.endMonth,
+  );
+  const paidMonths = confirmedPaidMonths(item);
+  const paidMonthCount =
+    business.social?.paidMonthCount ??
+    (paidMonths.length ? paidMonths.length : null);
+  const reason = recruiterReason({
+    rowStatus,
+    companyMatch: business.comparison.companyMatch,
+    startStatus: business.comparison.startMonthStatus,
+    endStatus: business.comparison.endMonthStatus,
+    startDifferenceMonths: business.comparison.startDifferenceMonths,
+    endDifferenceMonths: business.comparison.endDifferenceMonths,
+    reviewRequiredFields: business.comparison.reviewRequiredFields,
+    gapMonths: business.social?.gapMonths ?? item.gapMonths,
+  });
+  const socialStart =
+    business.social?.startMonth ?? item.socialSecurityPeriod?.startMonth;
+  const socialEnd =
+    business.social?.endMonth ?? item.socialSecurityPeriod?.endMonth;
+  const socialCompanyKnown = socialCompany !== "—";
+  const correctionReference =
+    rowStatus === "RESUME_ONLY" || !socialCompanyKnown
+      ? "待人工确认"
+      : [
+          socialCompany,
+          position === "—" ? "待人工确认" : position,
+          socialStart && socialEnd
+            ? `${socialStart} 至 ${socialEnd}`
+            : "待人工确认",
+        ].join("\n");
+  const socialStandardText = socialCompanyKnown
+    ? [
+        `社保公司：${socialCompany}`,
+        `社保时间：${socialPeriod}`,
+        `实际缴纳：${paidMonthCount === null ? "无法从材料确定" : `${paidMonthCount}个月`}`,
+      ].join("\n")
+    : "待人工确认";
+  const itemText = [
+    `候选人：${candidateName}`,
+    `简历：${resumeCompany}`,
+    `职位：${position}`,
+    `简历时间：${resumePeriod}`,
+    `社保：${socialCompany}`,
+    `社保时间：${socialPeriod}`,
+    `公司是否一致：${companyConsistentLabel(rowStatus, business.comparison.companyMatch)}`,
+    `开始月份差：${startDifferenceLabel(rowStatus, business.comparison.startMonthStatus, business.comparison.startDifferenceMonths)}`,
+    `结束月份差：${endDifferenceLabel(rowStatus, business.comparison.endMonthStatus, business.comparison.endDifferenceMonths)}`,
+    `结果：${recruiterStatusLabels[rowStatus]}`,
+    `原因：${reason}`,
+    `实际社保月数：${paidMonthCount === null ? "无法从材料确定" : `${paidMonthCount}个月`}`,
+  ].join("\n");
+  return {
+    id: item.id,
+    index: index + 1,
+    resumeCompany,
+    position,
+    resumePeriod,
+    socialCompany,
+    socialPeriod,
+    companyConsistentLabel: companyConsistentLabel(
+      rowStatus,
+      business.comparison.companyMatch,
+    ),
+    startDifferenceLabel: startDifferenceLabel(
+      rowStatus,
+      business.comparison.startMonthStatus,
+      business.comparison.startDifferenceMonths,
+    ),
+    endDifferenceLabel: endDifferenceLabel(
+      rowStatus,
+      business.comparison.endMonthStatus,
+      business.comparison.endDifferenceMonths,
+    ),
+    rowStatus,
+    rowStatusLabel: recruiterStatusLabels[rowStatus],
+    reason,
+    paidMonthCount,
+    paidMonthLabel:
+      paidMonthCount === null ? "无法从材料确定" : `${paidMonthCount}个月`,
+    personalInsurance,
+    itemText,
+    socialStandardText,
+    correctionReference,
+  };
+}
+
+export function buildRecruiterTotals(items: ResultViewItem[]): RecruiterTotals {
+  const companyMonths = new Set<string>();
+  const personalMonths = new Set<string>();
+  for (const item of items) {
+    const months = confirmedPaidMonths(item);
+    const personal = isPersonalInsuranceRecord({
+      matchStatus: item.matchStatus,
+      socialCompany:
+        item.businessResult.social?.companyRaw ??
+        item.rawSocialSecurityCompanyName,
+      personalInsurance: item.businessResult.social?.personalInsurance,
+    });
+    for (const month of months) {
+      if (personal) personalMonths.add(month);
+      else companyMonths.add(month);
+    }
+  }
+  const actualMonths = new Set([...companyMonths, ...personalMonths]);
+  const actual = formatPaidMonthsAndYears(actualMonths.size);
+  const salary = formatPaidMonthsAndYears(companyMonths.size);
+  return {
+    companyPaidMonthCount: companyMonths.size,
+    personalPaidMonthCount: personalMonths.size,
+    actualPaidMonthCount: actualMonths.size,
+    salaryEffectiveMonthCount: companyMonths.size,
+    actualPaidDuration: actual.duration,
+    salaryEffectiveDuration: salary.duration,
+  };
+}
+
+export function buildRecruiterSummary(input: {
+  candidateName: string;
+  rows: RecruiterComparisonRow[];
+  totals: RecruiterTotals;
+}): RecruiterSummary {
+  const passCount = input.rows.filter((row) => row.rowStatus === "PASS").length;
+  const failCount = input.rows.filter((row) => row.rowStatus === "FAIL").length;
+  const reviewCount = input.rows.filter((row) => row.rowStatus === "NEEDS_REVIEW").length;
+  const resumeOnlyCount = input.rows.filter((row) => row.rowStatus === "RESUME_ONLY").length;
+  const socialOnlyCount = input.rows.filter((row) => row.rowStatus === "SOCIAL_ONLY").length;
+  const conclusion =
+    failCount > 0 || resumeOnlyCount > 0 || socialOnlyCount > 0
+      ? "FAIL"
+      : reviewCount > 0 || input.rows.length === 0
+        ? "NEEDS_REVIEW"
+        : "PASS";
+  const conclusionLabel =
+    conclusion === "PASS" ? "通过" : conclusion === "FAIL" ? "不通过" : "待人工确认";
+  const detailLines = [
+    `共核验${input.rows.length}段记录：`,
+    `${passCount}段一致`,
+    `${failCount}段不通过`,
+    `${resumeOnlyCount}段社保未体现`,
+    `${socialOnlyCount}段简历未体现`,
+    `${reviewCount}段待人工确认`,
+  ];
+  const headline = `整体结论：${conclusionLabel}`;
+  const fullText = [
+    `候选人：${input.candidateName}`,
+    headline,
+    ...detailLines,
+    "",
+    `实际缴费：${input.totals.actualPaidMonthCount}个月`,
+    `折算年限：${input.totals.actualPaidDuration}`,
+    `公司缴纳：${input.totals.companyPaidMonthCount}个月`,
+    `个人缴纳：${input.totals.personalPaidMonthCount}个月`,
+    `定薪有效缴纳：${input.totals.salaryEffectiveMonthCount}个月`,
+    ...input.rows.flatMap((row) => ["", `${row.index}.`, row.itemText]),
+  ].join("\n");
+  return {
+    conclusion,
+    conclusionLabel,
+    totalRows: input.rows.length,
+    passCount,
+    failCount,
+    reviewCount,
+    resumeOnlyCount,
+    socialOnlyCount,
+    headline,
+    detailLines,
+    fullText,
+  };
 }
 
 function matchingFieldIssues(
@@ -779,6 +1271,9 @@ function businessResult(input: {
             ? `${gapMonths.length}个月`
             : "无",
           fieldStatus: socialStatus,
+          personalInsurance:
+            social.personalInsurance ||
+            PERSONAL_INSURANCE_PATTERN.test(social.companyRaw.value ?? ""),
         }
       : null,
     comparison: {
@@ -1001,6 +1496,15 @@ export function buildResultViewModel(input: {
       }),
     };
   });
+  const recruiterTable = items.map((item, index) =>
+    buildRecruiterRow(item, index, report.candidateName),
+  );
+  const recruiterTotals = buildRecruiterTotals(items);
+  const recruiterSummary = buildRecruiterSummary({
+    candidateName: report.candidateName,
+    rows: recruiterTable,
+    totals: recruiterTotals,
+  });
   return {
     schemaVersion: 3,
     legacy: false,
@@ -1018,6 +1522,9 @@ export function buildResultViewModel(input: {
     humanReview: input.humanReview,
     summary: report.summary,
     items,
+    recruiterTable,
+    recruiterTotals,
+    recruiterSummary,
     evidenceIssues: report.evidenceIssues,
   };
 }
