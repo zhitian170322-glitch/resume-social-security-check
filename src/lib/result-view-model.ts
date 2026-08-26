@@ -548,8 +548,17 @@ const recruiterStatusLabels: Record<RecruiterRowStatus, string> = {
 function companyConsistentLabel(
   rowStatus: RecruiterRowStatus,
   companyMatch: VerificationBusinessResult["comparison"]["companyMatch"],
+  resumeCompany: string,
+  socialCompany: string,
 ) {
-  if (rowStatus === "RESUME_ONLY" || rowStatus === "SOCIAL_ONLY") return "—";
+  if (
+    rowStatus === "RESUME_ONLY" ||
+    rowStatus === "SOCIAL_ONLY" ||
+    resumeCompany === "—" ||
+    socialCompany === "—"
+  ) {
+    return "—";
+  }
   if (companyMatch === "EXACT") return "一致";
   if (companyMatch === "NO_MATCH") return "不一致";
   return "待人工确认";
@@ -598,14 +607,26 @@ function recruiterReason(input: {
   endDifferenceMonths: number | null;
   reviewRequiredFields: string[];
   gapMonths: string[];
+  personalInsurance: boolean;
+  resumeCompany: string;
+  socialCompany: string;
 }) {
   if (input.rowStatus === "PASS") {
     return "公司一致，开始时间一致，结束时间一致";
   }
   if (input.rowStatus === "RESUME_ONLY") return "该段简历经历未找到对应社保记录";
   if (input.rowStatus === "SOCIAL_ONLY") return "社保存在简历未体现的缴纳单位";
+  if (input.personalInsurance) {
+    return "个人参保或灵活就业，不自动计入工作经历和定薪年限";
+  }
   const parts: string[] = [];
-  if (input.companyMatch === "NO_MATCH") parts.push("公司名称不一致");
+  if (
+    input.companyMatch === "NO_MATCH" &&
+    input.resumeCompany !== "—" &&
+    input.socialCompany !== "—"
+  ) {
+    parts.push("公司名称不一致");
+  }
   if (input.companyMatch === "NORMALIZED_MATCH" || input.companyMatch === "FUZZY_CANDIDATE") {
     parts.push("公司名称需要人工确认");
   }
@@ -713,6 +734,9 @@ function buildRecruiterRow(
     endDifferenceMonths: business.comparison.endDifferenceMonths,
     reviewRequiredFields: business.comparison.reviewRequiredFields,
     gapMonths: business.social?.gapMonths ?? item.gapMonths,
+    personalInsurance,
+    resumeCompany,
+    socialCompany,
   });
   const socialStart =
     business.social?.startMonth ?? item.socialSecurityPeriod?.startMonth;
@@ -743,7 +767,7 @@ function buildRecruiterRow(
     `简历时间：${resumePeriod}`,
     `社保：${socialCompany}`,
     `社保时间：${socialPeriod}`,
-    `公司是否一致：${companyConsistentLabel(rowStatus, business.comparison.companyMatch)}`,
+    `公司是否一致：${companyConsistentLabel(rowStatus, business.comparison.companyMatch, resumeCompany, socialCompany)}`,
     `开始月份差：${startDifferenceLabel(rowStatus, business.comparison.startMonthStatus, business.comparison.startDifferenceMonths)}`,
     `结束月份差：${endDifferenceLabel(rowStatus, business.comparison.endMonthStatus, business.comparison.endDifferenceMonths)}`,
     `结果：${recruiterStatusLabels[rowStatus]}`,
@@ -761,6 +785,8 @@ function buildRecruiterRow(
     companyConsistentLabel: companyConsistentLabel(
       rowStatus,
       business.comparison.companyMatch,
+      resumeCompany,
+      socialCompany,
     ),
     startDifferenceLabel: startDifferenceLabel(
       rowStatus,

@@ -1057,7 +1057,11 @@ describe("[synthetic] recruiter comparison table", () => {
     expect(mapped.recruiterSummary.fullText).toContain("实际缴费：85个月");
     expect(mapped.recruiterSummary.fullText).toContain("折算年限：7年1个月");
     expect(mapped.recruiterSummary.fullText).not.toMatch(/约7\.08年/);
-    expect(mapped.recruiterTable[2].rowStatus).toBe("NEEDS_REVIEW");
+    expect(mapped.recruiterTable[2]).toMatchObject({
+      rowStatus: "NEEDS_REVIEW",
+      companyConsistentLabel: "—",
+      reason: "个人参保或灵活就业，不自动计入工作经历和定薪年限",
+    });
     expect(mapped.recruiterSummary.conclusion).not.toBe("PASS");
   });
 
