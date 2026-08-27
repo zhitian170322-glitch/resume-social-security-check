@@ -289,10 +289,12 @@ export function EvidenceResultView({
               复制修正参考
             </button>
           </div>
-          <details className="evidence-details">
-            <summary>技术证据</summary>
-            <EvidenceInspector item={selected} />
-          </details>
+          {selected.evidence.length > 0 ? (
+            <details className="evidence-details">
+              <summary>技术调试信息</summary>
+              <EvidenceInspector item={selected} />
+            </details>
+          ) : null}
         </article>
       )}
 

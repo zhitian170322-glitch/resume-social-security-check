@@ -93,19 +93,29 @@ export async function GET(
     | undefined;
   if (!task) return NextResponse.json({ message: "记录不存在" }, { status: 404 });
   const result = parseJson(task.result_json);
-  const verification = latestArtifactPayload<Phase8VerificationResult>(
-    task.id,
-    "VERIFICATION_COMPLETE",
-  );
-  const derivedFacts = latestArtifactPayload<DerivedFactsPayload>(
-    task.id,
-    "DERIVED_FACTS",
-  );
+  const resultObject =
+    result && typeof result === "object" ? (result as { schemaVersion?: number }) : null;
+  const verification =
+    resultObject?.schemaVersion === 4
+      ? null
+      : latestArtifactPayload<Phase8VerificationResult>(
+          task.id,
+          "VERIFICATION_COMPLETE",
+        );
+  const derivedFacts =
+    resultObject?.schemaVersion === 4
+      ? null
+      : latestArtifactPayload<DerivedFactsPayload>(
+          task.id,
+          "DERIVED_FACTS",
+        );
   const validationStage =
-    latestArtifactPayload<EvidenceValidationStagePayload>(
-      task.id,
-      "EVIDENCE_VALIDATED",
-    );
+    resultObject?.schemaVersion === 4
+      ? null
+      : latestArtifactPayload<EvidenceValidationStagePayload>(
+          task.id,
+          "EVIDENCE_VALIDATED",
+        );
   const review = humanReview(task);
   return NextResponse.json({
     id: task.id,

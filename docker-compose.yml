@@ -17,7 +17,9 @@ services:
     expose:
       - "3000"
     networks:
-      - orangeito_default
+      orangeito_default:
+        aliases:
+          - resume-social-security-check-app-1
     mem_limit: 1400m
     cpus: 1.75
     healthcheck:

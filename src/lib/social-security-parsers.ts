@@ -887,7 +887,67 @@ function companyCandidate(cell: SocialSecurityOCRCell) {
   ) {
     return false;
   }
-  return /公司|集团|事务所|中心|工厂|银行|学校|医院|合作社/u.test(text);
+  return /公司|集团|事务所|中心|工厂|银行|学校|医院|合作社|个人参保|个人缴费|灵活就业/u.test(
+    text,
+  );
+}
+
+export function ocrResultFromRawText(
+  source: SocialSecurityOCRResult,
+  rawText = source.rawText,
+): SocialSecurityOCRResult {
+  const lines = rawText
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const cells: SocialSecurityOCRCell[] = [];
+  lines.forEach((line, row) => {
+    const parts = line
+      .split(/\s*\|\s*|\t/u)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const pieces = parts.length ? parts : [line];
+    pieces.forEach((text, column) => {
+      cells.push({
+        id: `raw:${row}:${column}`,
+        rawText: text,
+        text,
+        row,
+        column,
+        rowSpan: 1,
+        columnSpan: 1,
+        confidence: null,
+        bbox: null,
+        polygon: null,
+      });
+    });
+  });
+  return {
+    ...source,
+    rawText,
+    tables: cells.length
+      ? [
+          {
+            id: "raw-text",
+            page: source.page,
+            cells,
+            confidence: null,
+            provider: source.provider,
+            providerVersion: source.providerVersion,
+            ocrVersion: source.ocrVersion,
+            contentHash: source.contentHash,
+            rawProviderResponseRef: source.rawProviderResponseRef,
+          },
+        ]
+      : [],
+  };
+}
+
+function ocrHasUsableTables(ocr: SocialSecurityOCRResult): boolean {
+  return (
+    tableTopologyValid(ocr) &&
+    ocr.tables.some((table) => table.cells.some((cell) => cell.rawText.trim()))
+  );
 }
 
 function fullMonthFacts(row: TableRow): GenericMonthFact[] {
@@ -1131,6 +1191,34 @@ function collectGenericFacts(
   return [...grouped.values()];
 }
 
+function mergeGenericFacts(
+  tableFacts: GenericCompanyFact[],
+  textFacts: GenericCompanyFact[],
+): GenericCompanyFact[] {
+  const merged = new Map<string, GenericCompanyFact>();
+  for (const fact of [...tableFacts, ...textFacts]) {
+    const key = fact.companyCell.rawText.trim();
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, fact);
+      continue;
+    }
+    const richer =
+      fact.months.length > current.months.length ? fact : current;
+    merged.set(key, {
+      ...richer,
+      months: [...current.months, ...fact.months].filter(
+        (month, index, all) =>
+          all.findIndex((entry) => entry.value === month.value) === index,
+      ),
+      statedPaidMonthCount:
+        current.statedPaidMonthCount ?? fact.statedPaidMonthCount,
+      intervalEvidence: current.intervalEvidence ?? fact.intervalEvidence,
+    });
+  }
+  return [...merged.values()];
+}
+
 export class GenericSocialSecurityParser implements SocialSecurityTableParser {
   parse(input: SocialSecurityParserInput): SocialSecurityParseResult;
   parse(ocr: SocialSecurityOCRResult, sourceFile: string): SocialSecurityParseResult;
@@ -1139,20 +1227,28 @@ export class GenericSocialSecurityParser implements SocialSecurityTableParser {
     sourceFile?: string,
   ): SocialSecurityParseResult {
     const unpacked = unpackInput(input, sourceFile);
-    if (!tableTopologyValid(unpacked.ocr)) {
+    const workingOcr = ocrHasUsableTables(unpacked.ocr)
+      ? unpacked.ocr
+      : ocrResultFromRawText(unpacked.ocr);
+    const workingInput = { ...unpacked, ocr: workingOcr };
+    if (!workingOcr.rawText.trim() && !ocrHasUsableTables(workingOcr)) {
       return {
         template: "GENERIC",
         status: "manual-required",
         autoVerifiable: false,
         records: [],
         rawRecords: [],
-        reasons: ["TABLE_CELL_ORDER_CONFLICT", "MANUAL_REVIEW_REQUIRED"],
+        reasons: ["NO_USABLE_OCR_TEXT"],
       };
     }
-    const evidence = evidenceForInput(unpacked);
+    const evidence = evidenceForInput(workingInput);
     const parsedRecords: ParsedSocialSecurityRecord[] = [];
     const rawRecords: SocialSecurityRawRecord[] = [];
-    const facts = collectGenericFacts(rows(unpacked.ocr), evidence);
+    const tableFacts = ocrHasUsableTables(unpacked.ocr)
+      ? collectGenericFacts(rows(unpacked.ocr), evidence)
+      : [];
+    const textFacts = collectGenericFacts(rows(ocrResultFromRawText(unpacked.ocr)), evidence);
+    const facts = mergeGenericFacts(tableFacts, textFacts);
     for (const fact of facts) {
       const candidateMonths = [
         ...new Set(fact.months.map((month) => month.value)),

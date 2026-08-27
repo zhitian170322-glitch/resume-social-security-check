@@ -24,7 +24,7 @@ import {
 import {
   AliyunSocialSecurityOCRProvider,
   CachedSocialSecurityOCRProvider,
-  recognizeSocialSecurityPageTableFirst,
+  recognizeSocialSecurityPageDualSource,
   SocialSecurityOCRError,
 } from "./social-security-provider";
 import type {
@@ -33,32 +33,18 @@ import type {
 } from "./social-security-table";
 import { SocialSecurityPageClassifier } from "./social-security-page-classifier";
 import { persistSocialSecurityOCRResult } from "./social-security-evidence";
-import {
-  parseSocialSecurityTable,
-  type ParsedSocialSecurityRecord,
-  type SocialSecurityParseResult,
-} from "./social-security-parsers";
+import { extractSocialRecords } from "./social-records";
 import { extractResumeWithEvidence } from "./deepseek";
 import {
-  normalizeCompanyCandidate,
-  validateResumeEvidence,
-  validateSocialEvidence,
-  type EvidenceIssue,
-} from "./evidence-validator";
+  type SocialRecord,
+  verifyResumeAndSocial,
+} from "./simple-verification";
 import {
   type DocumentPage,
   DocumentPageSchema,
-  type EvidenceMonthField,
-  type EvidenceMonthsField,
-  type EvidenceNumberField,
-  type EvidenceStringField,
   type ResumeEvidenceExtraction,
   ResumeEvidenceExtractionSchema,
-  type SocialSecurityEvidenceRecord,
-  SocialSecurityEvidenceRecordSchema,
 } from "./schemas";
-import type { Phase8VerificationResult } from "./verification-engine-phase8";
-import { createEvidenceReport } from "./result";
 import { safeErrorMessage } from "./errors";
 import {
   contentHash,
@@ -75,12 +61,6 @@ import {
   PipelineIntegrationError,
   VERIFICATION_ENGINE_VERSION,
   assertPipelineVersions,
-  createEvidenceValidationStage,
-  runIntegratedVerification,
-  validatedEvidenceSet,
-  verificationResultForStorage,
-  type DerivedFactsPayload,
-  type EvidenceValidationStagePayload,
 } from "./worker-pipeline-integration";
 
 type FileRow = {
@@ -104,8 +84,7 @@ type OCRStagePayload = {
 
 type StructuredPayload = {
   resume: ResumeEvidenceExtraction;
-  social: SocialSecurityEvidenceRecord[];
-  issues: EvidenceIssue[];
+  socialRecords: SocialRecord[];
 };
 
 const workerGlobal = globalThis as typeof globalThis & { verificationWorkerRunning?: boolean };
@@ -117,7 +96,7 @@ export const PIPELINE_VERSIONS: PipelineArtifactVersions = {
   evidenceValidatorVersion: EVIDENCE_VALIDATOR_VERSION,
   verificationEngineVersion: VERIFICATION_ENGINE_VERSION,
 };
-const PIPELINE_VERSION = `evidence-v2.7:${JSON.stringify(PIPELINE_VERSIONS)}`;
+const PIPELINE_VERSION = `simple-v2:${JSON.stringify(PIPELINE_VERSIONS)}`;
 
 export function isEvidencePipelineTask(
   task: Pick<TaskRow, "task_schema_version" | "extraction_version">,
@@ -133,71 +112,11 @@ function parseStructuredCache(value: StructuredPayload | null): StructuredPayloa
   try {
     return {
       resume: ResumeEvidenceExtractionSchema.parse(value.resume),
-      social: SocialSecurityEvidenceRecordSchema.array().parse(value.social),
-      issues: Array.isArray(value.issues) ? value.issues : [],
+      socialRecords: Array.isArray(value.socialRecords) ? value.socialRecords : [],
     };
   } catch {
     return null;
   }
-}
-
-function parseEvidenceValidationCache(
-  value: EvidenceValidationStagePayload | null,
-): EvidenceValidationStagePayload | null {
-  if (!value) return null;
-  const statuses = new Set([
-    "VALIDATED",
-    "UNCERTAIN",
-    "CONFLICT",
-    "UNSUPPORTED",
-  ]);
-  if (
-    !statuses.has(value.validationStatus) ||
-    !statuses.has(value.resume?.validationStatus) ||
-    !statuses.has(value.socialSecurity?.validationStatus) ||
-    !Array.isArray(value.issues) ||
-    !Number.isInteger(value.evidenceCount)
-  ) {
-    return null;
-  }
-  try {
-    return {
-      ...value,
-      resume: {
-        ...value.resume,
-        evidence: ResumeEvidenceExtractionSchema.parse(
-          value.resume.evidence,
-        ),
-      },
-      socialSecurity: {
-        ...value.socialSecurity,
-        evidence: SocialSecurityEvidenceRecordSchema.array().parse(
-          value.socialSecurity.evidence,
-        ),
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseVerificationCache(
-  value: Phase8VerificationResult | null,
-): Phase8VerificationResult | null {
-  if (
-    !value ||
-    ![
-      "CONSISTENT",
-      "INCONSISTENT",
-      "PARTIALLY_CONSISTENT",
-      "INSUFFICIENT_EVIDENCE",
-      "MANUAL_REVIEW_REQUIRED",
-    ].includes(value.conclusion) ||
-    !Array.isArray(value.items)
-  ) {
-    return null;
-  }
-  return value;
 }
 
 function parseOCRStageCache(value: OCRStagePayload | null): OCRStagePayload | null {
@@ -316,7 +235,7 @@ async function socialSecurityPageOCR(
     }
   }
   const provider = socialSecurityOCRProvider(task, documentId, page);
-  const outcome = await recognizeSocialSecurityPageTableFirst({
+  const outcome = await recognizeSocialSecurityPageDualSource({
     provider,
     data: prepared,
     mimeType,
@@ -522,22 +441,6 @@ async function extractOCRStage(
             text: page.localText,
             source: "PDF_TEXT",
           });
-          if (classification.pageType === "UNSUPPORTED") {
-            const documentPage: DocumentPage = {
-              page: page.page,
-              sourceFile: file.original_name,
-              pdfText: page.localText,
-              ocrText: null,
-              selectedText: null,
-              extractionMethod: "manual_required",
-              qualityScore: page.qualityScore,
-              ocrConfidence: null,
-              warnings: ["UNSUPPORTED", "MANUAL_REVIEW_REQUIRED"],
-            };
-            pages.push(documentPage);
-            fileDocumentPages.push(documentPage);
-            continue;
-          }
           const image = await renderPdfPage(path, page.page);
           const result = await socialSecurityPageOCR(
             task,
@@ -634,181 +537,6 @@ async function extractOCRStage(
   return { resumeSourceFile: resumeFile.original_name, pages, socialPages };
 }
 
-function stringEvidence(
-  value: string | null,
-  record: ParsedSocialSecurityRecord,
-  status: EvidenceStringField["status"],
-  confidence = record.source.confidence,
-): EvidenceStringField {
-  return {
-    value,
-    status,
-    sourceFile: record.source.file,
-    sourcePage: record.source.page,
-    sourceQuote: record.source.quote,
-    extractionMethod: "table_ocr",
-    confidence: confidence ?? 0,
-  };
-}
-
-function monthEvidence(
-  value: string | null,
-  record: ParsedSocialSecurityRecord,
-  status: EvidenceMonthField["status"],
-  confidence = record.source.confidence,
-): EvidenceMonthField {
-  return { ...stringEvidence(value, record, status, confidence), value };
-}
-
-function numberEvidence(
-  value: number | null,
-  record: ParsedSocialSecurityRecord,
-  status: EvidenceNumberField["status"],
-  confidence = record.source.confidence,
-): EvidenceNumberField {
-  return { ...stringEvidence(null, record, status, confidence), value };
-}
-
-function monthsEvidence(
-  value: string[] | null,
-  record: ParsedSocialSecurityRecord,
-  status: EvidenceMonthsField["status"],
-  confidence = record.source.confidence,
-): EvidenceMonthsField {
-  return { ...stringEvidence(null, record, status, confidence), value };
-}
-
-function convertParsedRecord(
-  record: ParsedSocialSecurityRecord,
-  template: "shenzhen" | "guangdong" | "generic",
-): SocialSecurityEvidenceRecord {
-  const statusFor = (confidence: number | null) =>
-    confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
-      ? ("verified" as const)
-      : ("uncertain" as const);
-  const companyStatus = statusFor(record.fieldConfidence.company);
-  const startStatus = statusFor(record.fieldConfidence.startMonth);
-  const endStatus = statusFor(record.fieldConfidence.endMonth);
-  const paidStatus = record.paidMonths?.length
-    ? statusFor(record.fieldConfidence.paidMonths)
-    : ("missing" as const);
-  const companyUncertain = /[OIl]/.test(record.companyRaw);
-  const outsourcingOrDispatch = /劳务派遣|人力资源|外包/.test(record.companyRaw);
-  return {
-    companyRaw: stringEvidence(
-      record.companyRaw,
-      record,
-      companyUncertain ? "uncertain" : companyStatus,
-      record.fieldConfidence.company,
-    ),
-    companyNormalized: normalizeCompanyCandidate(record.companyRaw),
-    startMonth: monthEvidence(
-      record.startMonth,
-      record,
-      startStatus,
-      record.fieldConfidence.startMonth,
-    ),
-    endMonth: monthEvidence(
-      record.endMonth,
-      record,
-      endStatus,
-      record.fieldConfidence.endMonth,
-    ),
-    paidMonths: monthsEvidence(
-      record.paidMonths?.length ? record.paidMonths : null,
-      record,
-      paidStatus,
-      record.fieldConfidence.paidMonths,
-    ),
-    statedPaidMonthCount: numberEvidence(
-      record.statedPaidMonthCount,
-      record,
-      record.statedPaidMonthCount === null
-        ? "missing"
-        : statusFor(record.source.confidence),
-    ),
-    pensionMonths: numberEvidence(
-      record.pensionMonths,
-      record,
-      record.pensionMonths === null
-        ? "unsupported"
-        : statusFor(record.fieldConfidence.pensionMonths),
-      record.fieldConfidence.pensionMonths,
-    ),
-    injuryMonths: numberEvidence(
-      record.injuryMonths,
-      record,
-      record.injuryMonths === null
-        ? "unsupported"
-        : statusFor(record.fieldConfidence.injuryMonths),
-      record.fieldConfidence.injuryMonths,
-    ),
-    unemploymentMonths: numberEvidence(
-      record.unemploymentMonths,
-      record,
-      record.unemploymentMonths === null
-        ? "unsupported"
-        : statusFor(record.fieldConfidence.unemploymentMonths),
-      record.fieldConfidence.unemploymentMonths,
-    ),
-    personalInsurance: /个人参保|个人缴费|灵活就业/.test(record.companyRaw),
-    sourceFile: record.source.file,
-    sourcePage: record.source.page,
-    sourceEvidence: [record.source.quote],
-    template,
-    warnings: [
-      ...([
-        companyStatus,
-        startStatus,
-        endStatus,
-        ...(record.paidMonths?.length ? [paidStatus] : []),
-      ].every((status) => status === "verified")
-        ? []
-        : ["OCR_CONFIDENCE_LOW"]),
-      ...(companyUncertain ? ["OCR_COMPANY_UNCERTAIN"] : []),
-      ...(outsourcingOrDispatch ? ["OUTSOURCING_OR_DISPATCH"] : []),
-    ],
-  };
-}
-
-function unsupportedSocialRecord(
-  sourceFile: string,
-  page: number,
-  quote: string,
-): SocialSecurityEvidenceRecord {
-  const record: ParsedSocialSecurityRecord = {
-    companyRaw: "无法确定",
-    companyNormalized: "",
-    startMonth: "1970-01",
-    endMonth: "1970-01",
-    paidMonths: [],
-    statedPaidMonthCount: null,
-    pensionMonths: null,
-    injuryMonths: null,
-    unemploymentMonths: null,
-    fieldConfidence: {
-      company: null,
-      startMonth: null,
-      endMonth: null,
-      paidMonths: null,
-      pensionMonths: null,
-      injuryMonths: null,
-      unemploymentMonths: null,
-    },
-    source: { file: sourceFile, page, quote, confidence: null },
-  };
-  return {
-    ...convertParsedRecord(record, "guangdong"),
-    companyRaw: stringEvidence(null, record, "unsupported"),
-    companyNormalized: null,
-    startMonth: monthEvidence(null, record, "unsupported"),
-    endMonth: monthEvidence(null, record, "unsupported"),
-    paidMonths: monthsEvidence(null, record, "unsupported"),
-    template: "generic",
-    warnings: ["PARSER_FAILED"],
-  };
-}
-
 async function structureStage(
   task: TaskRow,
   payload: OCRStagePayload,
@@ -816,7 +544,6 @@ async function structureStage(
   const resumePages = payload.pages.filter(
     (page) => page.sourceFile === payload.resumeSourceFile,
   );
-  const issues: EvidenceIssue[] = [];
   const deepSeekCacheKey = contentHash(
     `${PIPELINE_VERSION}:deepseek-resume:${JSON.stringify(
       resumePages.map((page) => [
@@ -855,7 +582,7 @@ async function structureStage(
       estimatedCost: 0,
     });
   }
-  const social: SocialSecurityEvidenceRecord[] = [];
+  const socialRecords: SocialRecord[] = [];
   const socialByFile = new Map<string, SocialSecurityOCRResult[]>();
   for (const page of payload.socialPages) {
     socialByFile.set(page.sourceFile, [
@@ -884,33 +611,9 @@ async function structureStage(
           .filter(Boolean)
           .join(",") || null,
     };
-    const parsed: SocialSecurityParseResult = parseSocialSecurityTable({
-      ocr: merged,
-      sourceFile,
-    });
-    if (!parsed.records.length) {
-      social.push(
-        unsupportedSocialRecord(
-          sourceFile,
-          merged.page,
-          merged.rawText || "无法识别表格结构",
-        ),
-      );
-      issues.push({
-        code: "EXTRACTION_UNSUPPORTED",
-        field: "socialSecurityStructure",
-        sourceFile,
-        sourcePage: merged.page,
-        message: parsed.reasons.join("；") || "社保字段无法从 OCR 结构中定位",
-      });
-      continue;
-    }
-    const converted = parsed.records.map((record) =>
-      convertParsedRecord(record, "generic"),
-    );
-    social.push(...converted);
+    socialRecords.push(...extractSocialRecords({ ocr: merged, sourceFile }));
   }
-  return { resume, social, issues };
+  return { resume, socialRecords };
 }
 
 function usageForTask(taskId: string) {
@@ -1063,99 +766,24 @@ async function processTask(task: TaskRow) {
   }
   updateTask(task.id, { stage: "STRUCTURED", updated_at: new Date().toISOString() });
 
-  let validated = parseEvidenceValidationCache(
-    readVersionedStageArtifact<EvidenceValidationStagePayload>({
-      taskId: task.id,
-      stage: "EVIDENCE_VALIDATED",
-      cacheKey,
-      versions: PIPELINE_VERSIONS,
-    }),
-  );
-  if (!validated) {
-    try {
-      const resumeValidation = validateResumeEvidence(
-        structured.resume,
-        ocrPayload.pages,
-      );
-      const socialValidation = validateSocialEvidence(
-        structured.social,
-        ocrPayload.pages,
-      );
-      validated = createEvidenceValidationStage({
-        versions: PIPELINE_VERSIONS,
-        resumeValidation,
-        socialValidation,
-        upstreamIssues: structured.issues,
-      });
-    } catch (error) {
-      throw new PipelineIntegrationError(
-        "EVIDENCE_VALIDATION_FAILED",
-        error instanceof Error ? error.message : "Evidence Validator failed",
-      );
-    }
-    writeVersionedStageArtifact({
-      taskId: task.id,
-      stage: "EVIDENCE_VALIDATED",
-      cacheKey,
-      versions: PIPELINE_VERSIONS,
-      payload: validated,
-    });
-  }
-  updateTask(task.id, {
-    stage: "EVIDENCE_VALIDATED",
-    updated_at: new Date().toISOString(),
+  const experiences = structured.resume.experiences.map((experience) => ({
+    companyRaw: experience.resumeCompany.value,
+    position: experience.position?.value ?? null,
+    startMonth: experience.resumeStartMonth.value,
+    endMonth: experience.resumeEndMonth.value,
+  }));
+  const report = verifyResumeAndSocial({
+    candidateName: structured.resume.candidateName.value ?? "姓名待人工确认",
+    experiences,
+    socialRecords: structured.socialRecords,
   });
-  logSafeEvent("info", {
+  writeVersionedStageArtifact({
     taskId: task.id,
-    stage: "EVIDENCE_VALIDATED",
-    version: PIPELINE_VERSIONS.evidenceValidatorVersion,
-    evidenceCount: validated.evidenceCount,
-    validationStatus: validated.validationStatus,
-  });
-
-  const verificationCacheKey = contentHash(
-    `${cacheKey}|${contentHash(JSON.stringify(validated))}`,
-  );
-  const validatedSet = validatedEvidenceSet(validated);
-  let derivedFacts = readVersionedStageArtifact<DerivedFactsPayload>({
-    taskId: task.id,
-    stage: "DERIVED_FACTS",
-    cacheKey: verificationCacheKey,
+    stage: "VERIFICATION_COMPLETE",
+    cacheKey,
     versions: PIPELINE_VERSIONS,
+    payload: report,
   });
-  let verificationResult = parseVerificationCache(
-    readVersionedStageArtifact<Phase8VerificationResult>({
-      taskId: task.id,
-      stage: "VERIFICATION_COMPLETE",
-      cacheKey: verificationCacheKey,
-      versions: PIPELINE_VERSIONS,
-    }),
-  );
-  if (!verificationResult || (validatedSet && !derivedFacts)) {
-    const integrated = runIntegratedVerification({
-      validationStage: validated,
-      onDerivedFacts: (facts) => {
-        derivedFacts = facts;
-        writeVersionedStageArtifact({
-          taskId: task.id,
-          stage: "DERIVED_FACTS",
-          cacheKey: verificationCacheKey,
-          versions: PIPELINE_VERSIONS,
-          payload: facts,
-        });
-      },
-    });
-    verificationResult = verificationResultForStorage(
-      integrated.verificationResult,
-    );
-    writeVersionedStageArtifact({
-      taskId: task.id,
-      stage: "VERIFICATION_COMPLETE",
-      cacheKey: verificationCacheKey,
-      versions: PIPELINE_VERSIONS,
-      payload: verificationResult,
-    });
-  }
   updateTask(task.id, {
     stage: "VERIFICATION_COMPLETE",
     updated_at: new Date().toISOString(),
@@ -1164,28 +792,16 @@ async function processTask(task: TaskRow) {
     taskId: task.id,
     stage: "VERIFICATION_COMPLETE",
     version: PIPELINE_VERSIONS.verificationEngineVersion,
-    evidenceCount: validated.evidenceCount,
-    validationStatus: validated.validationStatus,
-    verificationStatus: verificationResult.conclusion,
+    verificationStatus: report.recruiterSummary.conclusion,
   });
   const usage = usageForTask(task.id);
-  const report = createEvidenceReport({
-    candidateName:
-      validated.resume.evidence.candidateName.value ?? "姓名待人工确认",
-    documentPages: ocrPayload.pages,
-    resumeExtraction: validated.resume.evidence,
-    socialSecurityRecords: validated.socialSecurity.evidence,
-    evidenceIssues: validated.issues,
-    items: verificationResult.items,
-    usage,
-  });
   const now = new Date().toISOString();
   updateTask(task.id, {
     status: "COMPLETED",
     stage: "COMPLETED",
     candidate_name: report.candidateName,
-    resume_json: JSON.stringify(validated.resume),
-    social_security_json: JSON.stringify(validated.socialSecurity),
+    resume_json: JSON.stringify(structured.resume),
+    social_security_json: JSON.stringify(structured.socialRecords),
     result_json: JSON.stringify(report),
     ocr_pages: usage.ocrPages,
     deepseek_calls: usage.deepseekCalls,

@@ -19,6 +19,7 @@ import type {
   Phase8VerificationResult,
   VerificationV2Item,
 } from "./verification-engine-phase8";
+import type { SimpleVerificationReport } from "./simple-verification";
 
 export type HumanReviewStatus = "PENDING" | "CONFIRMED" | "REJECTED";
 export type DisplayEvidenceStatus =
@@ -1013,16 +1014,6 @@ function dateComparison(input: {
       message: "缺少可比较的月份。",
     };
   }
-  if (
-    input.resumeStatus !== "VALIDATED" ||
-    input.socialStatus !== "VALIDATED"
-  ) {
-    return {
-      status: "MANUAL_REVIEW_REQUIRED",
-      differenceMonths: null,
-      message: `${input.kind === "start" ? "开始" : "结束"}时间需人工确认。`,
-    };
-  }
   const signedDifference =
     monthIndex(input.socialValue) - monthIndex(input.resumeValue);
   const differenceMonths = Math.abs(signedDifference);
@@ -1395,6 +1386,159 @@ function trustStatus(
   return { code: "EVIDENCE_COMPLETE" as const, label: "证据完整" };
 }
 
+function buildSimpleResultViewModel(
+  report: SimpleVerificationReport,
+  humanReview: HumanReview,
+): ResultViewModel {
+  const conclusion =
+    report.recruiterSummary.conclusion === "PASS"
+      ? "CONSISTENT"
+      : report.recruiterSummary.conclusion === "FAIL"
+        ? "INCONSISTENT"
+        : "MANUAL_REVIEW_REQUIRED";
+  const items: ResultViewItem[] = report.rows.map((row, index) => ({
+    id: `simple-${index}`,
+    matchStatus:
+      row.status === "PASS"
+        ? "EXACT_MATCH"
+        : row.status === "FAIL"
+          ? row.companyConsistent === false
+            ? "COMPANY_MISMATCH"
+            : "PERIOD_MISMATCH"
+          : row.status === "RESUME_ONLY"
+            ? "RESUME_ONLY"
+            : row.status === "SOCIAL_ONLY"
+              ? "SOCIAL_SECURITY_ONLY"
+              : "MANUAL_REVIEW_REQUIRED",
+    statusLabel: report.recruiterTable[index]?.rowStatusLabel ?? row.status,
+    companyMatchType:
+      row.companyConsistent === true
+        ? "EXACT"
+        : row.companyConsistent === false
+          ? "NO_MATCH"
+          : null,
+    companyMatchLabel:
+      row.companyConsistent === true
+        ? "原文一致"
+        : row.companyConsistent === false
+          ? "公司不一致"
+          : "无可比较公司",
+    rawResumeCompanyName: row.resume?.companyRaw ?? null,
+    rawSocialSecurityCompanyName: row.social?.companyRaw ?? null,
+    normalizedCompanyName: null,
+    resumePeriod:
+      row.resume?.startMonth && row.resume.endMonth
+        ? { startMonth: row.resume.startMonth, endMonth: row.resume.endMonth }
+        : null,
+    socialSecurityPeriod:
+      row.social?.startMonth && row.social.endMonth
+        ? { startMonth: row.social.startMonth, endMonth: row.social.endMonth }
+        : null,
+    paidMonths: row.social?.paidMonths ?? [],
+    missingMonths: [],
+    extraMonths: [],
+    gapMonths: [],
+    warnings: [],
+    specialLabels: [],
+    confidence: 1,
+    requiresManualReview: row.status !== "PASS",
+    description: row.reason,
+    rules: ["公司主体一致且起止月份差为 0 才可自动通过"],
+    evidence: [],
+    derivedFact: null,
+    businessResult: {
+      scenario:
+        row.status === "RESUME_ONLY"
+          ? "RESUME_WITHOUT_SOCIAL_RECORD"
+          : row.status === "SOCIAL_ONLY"
+            ? "UNDECLARED_SOCIAL_RECORD"
+            : "MATCHED_RECORDS",
+      scenarioMessage: row.reason,
+      resume: row.resume
+        ? {
+            companyRaw: row.resume.companyRaw,
+            position: row.resume.position,
+            startMonth: row.resume.startMonth,
+            endMonth: row.resume.endMonth,
+            fieldStatus: {
+              companyRaw: row.resume.companyRaw ? "VALIDATED" : "MISSING",
+              position: row.resume.position ? "VALIDATED" : "MISSING",
+              startMonth: row.resume.startMonth ? "VALIDATED" : "MISSING",
+              endMonth: row.resume.endMonth ? "VALIDATED" : "MISSING",
+            },
+          }
+        : null,
+      social: row.social
+        ? {
+            companyRaw: row.social.companyRaw,
+            startMonth: row.social.startMonth,
+            endMonth: row.social.endMonth,
+            statedPaidMonthCount: null,
+            paidMonthCount: row.social.paidMonths.length || null,
+            paidYears: null,
+            paidRemainingMonths: null,
+            paidDuration: null,
+            timeSpanMonths: null,
+            gapMonths: [],
+            gapSummary: "",
+            fieldStatus: {
+              companyRaw: row.social.companyRaw ? "VALIDATED" : "MISSING",
+              startMonth: row.social.startMonth ? "VALIDATED" : "MISSING",
+              endMonth: row.social.endMonth ? "VALIDATED" : "MISSING",
+              paidMonths: row.social.paidMonths.length ? "VALIDATED" : "MISSING",
+              statedPaidMonthCount: "MISSING",
+            },
+            personalInsurance: row.social.paymentType === "personal",
+          }
+        : null,
+      comparison: {
+        companyMatch:
+          row.companyConsistent === true
+            ? "EXACT"
+            : row.companyConsistent === false
+              ? "NO_MATCH"
+              : "FUZZY_CANDIDATE",
+        startMonthStatus: "MATCH",
+        startDifferenceMonths: row.startMonthDifference,
+        startMessage: "",
+        endMonthStatus: "MATCH",
+        endDifferenceMonths: row.endMonthDifference,
+        endMessage: "",
+        reviewRequiredFields: [],
+      },
+    },
+  }));
+  return {
+    schemaVersion: 3,
+    legacy: false,
+    candidateName: report.candidateName,
+    verifiedAt: report.verifiedAt,
+    machineResult: {
+      conclusion,
+      label: conclusionLabels[conclusion],
+    },
+    trustStatus: { code: "EVIDENCE_COMPLETE", label: "字段按自身取值展示" },
+    humanReview,
+    summary: {
+      resumeExperienceCount: report.experiences.length,
+      socialSecurityCompanyCount: report.socialRecords.length,
+      exactMatchCount: report.recruiterSummary.passCount,
+      anomalyCount: report.recruiterSummary.failCount,
+      manualReviewCount: report.recruiterSummary.reviewCount,
+      conclusion:
+        report.recruiterSummary.conclusion === "PASS" ? "核验通过" : "建议人工复核",
+      concerns: report.recruiterTable
+        .filter((row) => row.rowStatus !== "PASS")
+        .map((row) => row.reason),
+    },
+    items,
+    recruiterTable: report.recruiterTable,
+    recruiterTotals: report.recruiterTotals,
+    recruiterSummary: report.recruiterSummary,
+    evidenceIssues: [],
+  };
+}
+
 export function buildResultViewModel(input: {
   taskSchemaVersion: number;
   result: unknown;
@@ -1404,6 +1548,17 @@ export function buildResultViewModel(input: {
   humanReview: HumanReview;
   tableCells: TableCellDisplay[];
 }): ResultViewModel {
+  if (
+    input.result &&
+    typeof input.result === "object" &&
+    "schemaVersion" in input.result &&
+    input.result.schemaVersion === 4
+  ) {
+    return buildSimpleResultViewModel(
+      input.result as SimpleVerificationReport,
+      input.humanReview,
+    );
+  }
   if (
     input.taskSchemaVersion < 2 ||
     !input.result ||

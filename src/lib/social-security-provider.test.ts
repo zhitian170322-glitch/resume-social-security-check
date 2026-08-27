@@ -108,7 +108,8 @@ describe("social-security OCR provider", () => {
       mimeType: "image/png",
     });
 
-    expect(calls).toEqual(["TABLE"]);
+    expect(calls).toEqual(["TABLE", "GENERAL"]);
+    expect(outcome.tableUsed).toBe(true);
     expect(outcome.selected.apiType).toBe("TABLE");
     expect(outcome.fallbackUsed).toBe(false);
   });
@@ -121,7 +122,7 @@ describe("social-security OCR provider", () => {
       ocrVersion: "mock-v1",
       async recognizeTable(_input, _mimeType, page = 1) {
         calls.push("TABLE");
-        return result("TABLE", page);
+        return { ...result("TABLE", page), rawText: "", tables: [] };
       },
       async recognizeGeneral(_input, _mimeType, page = 1) {
         calls.push("GENERAL");

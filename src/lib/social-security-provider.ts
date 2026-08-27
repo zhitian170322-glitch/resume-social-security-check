@@ -9,6 +9,13 @@ import { config } from "./config";
 import { db } from "./db";
 import { contentHash } from "./stage-cache";
 import {
+  adaptAliyunOcrResponse,
+  describeOcrEnvelope,
+  hasUsableOcrPage,
+  mergeOcrPages,
+  type OcrPage,
+} from "./ocr-adapter";
+import {
   decodeAliyunRecognizeTableOcrResponse,
   type SocialSecurityOCRProvider,
   type SocialSecurityOCRResult,
@@ -42,11 +49,80 @@ export function hasUsableSocialSecurityTable(
   });
 }
 
+function emptySocialSecurityResult(
+  page: number,
+  apiType: SocialSecurityOCRApiType,
+  requestId: string | null = null,
+): SocialSecurityOCRResult {
+  return {
+    page,
+    rawText: "",
+    tables: [],
+    requestId,
+    provider: "aliyun",
+    providerVersion: "ocr-api20210707",
+    apiType,
+    ocrVersion: config.SOCIAL_SECURITY_OCR_VERSION,
+    contentHash: "",
+    rawProviderResponseRef: requestId,
+  };
+}
+
+function ocrPageToResult(
+  page: OcrPage,
+  apiType: SocialSecurityOCRApiType,
+  extra?: Partial<SocialSecurityOCRResult>,
+): SocialSecurityOCRResult {
+  return {
+    page: page.page,
+    rawText: page.rawText,
+    tables: page.tables.map((table, index) => ({
+      id: `adapted-${index}`,
+      page: page.page,
+      cells: table.cells.map((cell, cellIndex) => ({
+        id: `${index}:${cellIndex}`,
+        rawText: cell.text,
+        text: cell.text,
+        row: cell.row,
+        column: cell.column,
+        rowSpan: 1,
+        columnSpan: 1,
+        confidence: null,
+        bbox: null,
+        polygon: null,
+      })),
+      confidence: null,
+      provider: extra?.provider ?? "aliyun",
+      providerVersion: extra?.providerVersion ?? "ocr-api20210707",
+      ocrVersion: extra?.ocrVersion ?? config.SOCIAL_SECURITY_OCR_VERSION,
+      contentHash: extra?.contentHash ?? "",
+      rawProviderResponseRef: page.requestId ?? null,
+    })),
+    requestId: page.requestId ?? null,
+    provider: extra?.provider ?? "aliyun",
+    providerVersion: extra?.providerVersion ?? "ocr-api20210707",
+    apiType,
+    ocrVersion: extra?.ocrVersion ?? config.SOCIAL_SECURITY_OCR_VERSION,
+    contentHash: extra?.contentHash ?? "",
+    rawProviderResponseRef: page.requestId ?? null,
+  };
+}
+
+async function recognizeSafely(
+  run: () => Promise<SocialSecurityOCRResult>,
+): Promise<SocialSecurityOCRResult | null> {
+  try {
+    return await run();
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Social-security pages always try Table OCR first. Classification remains
- * metadata only and cannot prevent a supported page from reaching Table OCR.
+ * Dual-source OCR: Table and General are independent. Either usable source
+ * is enough to continue. Schema differences never fail the page.
  */
-export async function recognizeSocialSecurityPageTableFirst(input: {
+export async function recognizeSocialSecurityPageDualSource(input: {
   provider: SocialSecurityOCRProvider;
   data: Buffer;
   mimeType: string;
@@ -55,26 +131,79 @@ export async function recognizeSocialSecurityPageTableFirst(input: {
   selected: SocialSecurityOCRResult;
   attempts: SocialSecurityOCRResult[];
   fallbackUsed: boolean;
+  tableUsed: boolean;
+  generalUsed: boolean;
 }> {
   const page = input.page ?? 1;
-  const table = await input.provider.recognizeTable(
-    input.data,
-    input.mimeType,
+  const table = await recognizeSafely(() =>
+    input.provider.recognizeTable(input.data, input.mimeType, page),
+  );
+  const general = await recognizeSafely(() =>
+    input.provider.recognizeGeneral(input.data, input.mimeType, page),
+  );
+  const attempts = [table, general].filter(
+    (result): result is SocialSecurityOCRResult => result !== null,
+  );
+  const tableUsable = Boolean(
+    table && (hasUsableSocialSecurityTable(table) || table.rawText.trim()),
+  );
+  const generalUsable = Boolean(general?.rawText.trim());
+  const mergedPage = mergeOcrPages(
+    [
+      table
+        ? {
+            page,
+            rawText: table.rawText,
+            tables: table.tables.map((item) => ({
+              cells: item.cells.map((cell) => ({
+                row: cell.row,
+                column: cell.column,
+                text: cell.text || cell.rawText,
+              })),
+            })),
+            requestId: table.requestId ?? undefined,
+          }
+        : null,
+      general
+        ? {
+            page,
+            rawText: general.rawText,
+            tables: [],
+            requestId: general.requestId ?? undefined,
+          }
+        : null,
+    ],
     page,
   );
-  if (hasUsableSocialSecurityTable(table)) {
-    return { selected: table, attempts: [table], fallbackUsed: false };
-  }
-  const general = await input.provider.recognizeGeneral(
-    input.data,
-    input.mimeType,
-    page,
-  );
+  const selected = attempts.length
+    ? {
+        ...(table ?? general ?? emptySocialSecurityResult(page, "TABLE")),
+        rawText: mergedPage.rawText,
+        tables: tableUsable && table ? table.tables : (table?.tables ?? []),
+        requestId: mergedPage.requestId ?? null,
+        apiType: tableUsable ? ("TABLE" as const) : ("GENERAL" as const),
+      }
+    : emptySocialSecurityResult(page, "TABLE");
   return {
-    selected: general,
-    attempts: [table, general],
-    fallbackUsed: true,
+    selected,
+    attempts: attempts.length ? attempts : [selected],
+    fallbackUsed: !tableUsable && generalUsable,
+    tableUsed: tableUsable,
+    generalUsed: generalUsable,
   };
+}
+
+/**
+ * @deprecated Dual-source recognition is the production path.
+ * Kept so existing tests and caches can still call the old name.
+ */
+export async function recognizeSocialSecurityPageTableFirst(input: {
+  provider: SocialSecurityOCRProvider;
+  data: Buffer;
+  mimeType: string;
+  page?: number;
+}) {
+  return recognizeSocialSecurityPageDualSource(input);
 }
 
 export class SocialSecurityOCRError extends Error {
@@ -111,65 +240,28 @@ function asRecord(value: unknown): UnknownRecord | null {
     : null;
 }
 
-function parseAliyunData(response: unknown): {
-  body: UnknownRecord;
-  data: UnknownRecord;
-  requestId: string | null;
-  statusCode?: number;
-} {
-  const envelope = asRecord(response) ?? {};
-  const body = asRecord(envelope.body) ?? envelope;
-  const rawData = body.data;
-  if (rawData === undefined || rawData === null) {
-    throw new SocialSecurityOCRError(
-      "OCR_SCHEMA_CHANGED",
-      "Aliyun OCR response does not contain data",
-      {
-        apiType: "GENERAL",
-        httpStatus:
-          typeof envelope.statusCode === "number"
-            ? envelope.statusCode
-            : undefined,
-      },
-    );
-  }
-  let data: UnknownRecord;
-  try {
-    data =
-      typeof rawData === "string"
-        ? (asRecord(JSON.parse(rawData)) ?? {})
-        : (asRecord(rawData) ?? {});
-  } catch (error) {
-    throw new SocialSecurityOCRError(
-      "OCR_SCHEMA_CHANGED",
-      "Aliyun OCR data is not valid JSON",
-      { apiType: "GENERAL" },
-      { cause: error },
-    );
-  }
-  const requestId = body.requestId ?? envelope.requestId;
-  return {
-    body,
-    data,
-    requestId:
-      requestId === undefined || requestId === null ? null : String(requestId),
-    statusCode:
-      typeof envelope.statusCode === "number"
-        ? envelope.statusCode
-        : undefined,
-  };
+function httpStatusOf(response: unknown): number | undefined {
+  const envelope = asRecord(response);
+  return typeof envelope?.statusCode === "number"
+    ? envelope.statusCode
+    : undefined;
 }
 
-function generalText(data: UnknownRecord): string {
-  if (typeof data.content === "string") return data.content;
-  if (!Array.isArray(data.prism_wordsInfo)) return "";
-  return data.prism_wordsInfo
-    .map((word) => {
-      const record = asRecord(word);
-      return record?.word === undefined ? "" : String(record.word);
-    })
-    .filter(Boolean)
-    .join("\n");
+function logUnknownOcrShape(
+  response: unknown,
+  apiType: SocialSecurityOCRApiType,
+) {
+  const note = describeOcrEnvelope(response);
+  console.info(
+    JSON.stringify({
+      level: "info",
+      at: new Date().toISOString(),
+      stage: "OCR_ADAPTER",
+      apiType,
+      topLevelKeys: note.topLevelKeys,
+      requestId: note.requestId ?? null,
+    }),
+  );
 }
 
 function classifyProviderError(
@@ -249,37 +341,22 @@ export class AliyunSocialSecurityOCRProvider implements SocialSecurityOCRProvide
         new RecognizeGeneralRequest({ body: Readable.from(input) }),
         new RuntimeOptions({ readTimeout: 60_000, connectTimeout: 10_000 }),
       );
-      const decoded = parseAliyunData(response);
-      const rawText = generalText(decoded.data);
-      if (!rawText) {
-        throw new SocialSecurityOCRError(
-          "OCR_SCHEMA_CHANGED",
-          "Aliyun General OCR returned no readable content",
-          {
-            apiType: "GENERAL",
-            httpStatus: decoded.statusCode,
-            requestId: decoded.requestId ?? undefined,
-          },
-        );
+      const adapted = adaptAliyunOcrResponse(response, page);
+      if (!hasUsableOcrPage(adapted)) {
+        logUnknownOcrShape(response, "GENERAL");
       }
       this.onCall?.({
         apiType: "GENERAL",
         durationMs: Date.now() - started,
-        httpStatus: decoded.statusCode,
-        requestId: decoded.requestId ?? undefined,
+        httpStatus: httpStatusOf(response),
+        requestId: adapted.requestId,
       });
-      return {
-        page,
-        rawText,
-        tables: [],
-        requestId: decoded.requestId,
+      return ocrPageToResult(adapted, "GENERAL", {
         provider: this.provider,
         providerVersion: this.providerVersion,
-        apiType: "GENERAL",
         ocrVersion: this.ocrVersion,
         contentHash: contentHash(input),
-        rawProviderResponseRef: decoded.requestId,
-      };
+      });
     } catch (error) {
       const classified = classifyProviderError(error, "GENERAL");
       this.onCall?.({
@@ -308,19 +385,33 @@ export class AliyunSocialSecurityOCRProvider implements SocialSecurityOCRProvide
         }),
         new RuntimeOptions({ readTimeout: 90_000, connectTimeout: 10_000 }),
       );
-      parseAliyunData(response);
+      const adapted = adaptAliyunOcrResponse(response, page);
       const decoded = decodeAliyunRecognizeTableOcrResponse(response, page, {
         contentHash: contentHash(input),
         providerVersion: this.providerVersion,
         ocrVersion: this.ocrVersion,
       });
+      const rawText = decoded.rawText.trim() || adapted.rawText;
+      const tables = decoded.tables.length
+        ? decoded.tables
+        : ocrPageToResult(adapted, "TABLE").tables;
+      if (!rawText && !tables.length) {
+        logUnknownOcrShape(response, "TABLE");
+      }
       this.onCall?.({
         apiType: "TABLE",
         durationMs: Date.now() - started,
-        httpStatus: asRecord(response)?.statusCode as number | undefined,
-        requestId: decoded.requestId ?? undefined,
+        httpStatus: httpStatusOf(response),
+        requestId: decoded.requestId ?? adapted.requestId,
       });
-      return decoded;
+      return {
+        ...decoded,
+        rawText,
+        tables,
+        requestId: decoded.requestId ?? adapted.requestId ?? null,
+        rawProviderResponseRef:
+          decoded.rawProviderResponseRef ?? adapted.requestId ?? null,
+      };
     } catch (error) {
       const classified = classifyProviderError(error, "TABLE");
       this.onCall?.({

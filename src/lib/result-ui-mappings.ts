@@ -3,8 +3,8 @@ export const PROCESSING_STAGES = [
   ["EXTRACTION_COMPLETE", "提取文本"],
   ["OCR_COMPLETE", "识别社保"],
   ["STRUCTURED", "解析材料"],
-  ["EVIDENCE_VALIDATED", "验证证据"],
-  ["VERIFICATION_COMPLETE", "执行核验"],
+  ["EVIDENCE_VALIDATED", "整理字段"],
+  ["VERIFICATION_COMPLETE", "配对比较"],
   ["COMPLETED", "生成结果"],
 ] as const;
 
@@ -14,7 +14,7 @@ const errorMessages: Record<string, string> = {
   OCR_TABLE_FAILED: "社保表格识别失败，建议人工复核材料。",
   OCR_INVALID_IMAGE: "材料图像无法识别，请重新上传清晰文件。",
   OCR_TIMEOUT: "OCR 服务响应超时，可以从当前阶段重试。",
-  OCR_SCHEMA_CHANGED: "OCR 返回格式异常，任务已安全停止。",
+  OCR_SCHEMA_CHANGED: "OCR 返回结构已适配，缺少文字时对应字段待人工确认。",
   PDF_PARSE_FAILED: "PDF 材料无法解析，请检查文件是否完整。",
   TEMPLATE_UNKNOWN: "社保模板无法可靠识别，需要人工复核。",
   PARSER_FAILED: "材料结构无法可靠解析，需要人工复核。",

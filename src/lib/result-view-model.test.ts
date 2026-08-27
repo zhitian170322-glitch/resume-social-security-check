@@ -615,7 +615,7 @@ describe("[synthetic] Phase 9 Result UI mapping", () => {
             comparison: {
               companyMatch: "EXACT",
               startMonthStatus: "MATCH",
-              endMonthStatus: "MANUAL_REVIEW_REQUIRED",
+              endMonthStatus: "MATCH",
               reviewRequiredFields: ["resume.endMonth"],
             },
           },
