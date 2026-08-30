@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import type { VerificationReport } from "@/lib/result";
 import type { VerificationResult } from "@/lib/schemas";
 import type { ResultViewModel } from "@/lib/result-view-model";
@@ -89,7 +89,14 @@ export function ResultView({ taskId }: { taskId: string }) {
             <Link className="soft-button" href="/">新建核验</Link>
           </nav>
         </header>
-        <EvidenceResultView model={viewModel} copy={copy} taskId={taskId} />
+        <Suspense fallback={<div className="empty">正在读取对照表…</div>}>
+          <EvidenceResultView
+            model={viewModel}
+            copy={copy}
+            taskId={taskId}
+            onResultChange={(next) => setViewModel(next)}
+          />
+        </Suspense>
         {message && <div className="toast">{message}</div>}
       </main>
     );

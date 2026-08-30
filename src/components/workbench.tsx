@@ -8,10 +8,19 @@ type HistoryItem = {
   id: string;
   status: string;
   candidateName: string | null;
-  anomalyCount: number;
-  conclusion: string | null;
+  overallConclusion: string;
+  overallConclusionLabel: string;
   createdAt: string;
+  updatedAt: string | null;
+  reviewStatus: string | null;
 };
+
+function conclusionClass(label: string) {
+  if (label === "通过") return "tone-pass";
+  if (label === "不通过") return "tone-fail";
+  if (label === "待人工确认") return "tone-review";
+  return "tone-legacy";
+}
 
 export function Workbench() {
   const router = useRouter();
@@ -53,6 +62,9 @@ export function Workbench() {
   }
 
   const pendingCount = history.filter((item) => !["COMPLETED", "FAILED"].includes(item.status)).length;
+  const reviewCount = history.filter(
+    (item) => item.overallConclusion === "NEEDS_REVIEW" || item.reviewStatus === "PENDING",
+  ).length;
   const completedToday = history.filter((item) => {
     const created = new Date(item.createdAt);
     const today = new Date();
@@ -63,14 +75,14 @@ export function Workbench() {
       created.getDate() === today.getDate()
     );
   }).length;
-  const anomalyCount = history.filter((item) => item.anomalyCount > 0).length;
+  const failCount = history.filter((item) => item.overallConclusion === "FAIL").length;
 
   return (
     <main className="shell">
       <header className="topbar">
         <div>
           <p className="eyebrow">今日工作台</p>
-          <h1>下午好</h1>
+          <h1>简历与社保严格核验</h1>
           <p className="subtitle">
             {pendingCount > 0 ? `还有 ${pendingCount} 个核查任务正在处理。` : "当前没有正在处理的核查任务。"}
           </p>
@@ -83,17 +95,22 @@ export function Workbench() {
       </header>
 
       <section className="dashboard-widgets" aria-label="任务概览">
-        {[
-          ["待处理", pendingCount, "info"],
-          ["待人工复核", "—", "neutral"],
-          ["今日完成", completedToday, "success"],
-          ["证据异常", anomalyCount, "warning"],
-        ].map(([label, value, tone]) => (
-          <div className={`dashboard-widget ${tone}`} key={label}>
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
+        <div className="dashboard-widget info">
+          <span>待处理</span>
+          <strong>{pendingCount}</strong>
+        </div>
+        <Link className="dashboard-widget warning" href="/history?review=1">
+          <span>待人工复核</span>
+          <strong>{reviewCount}</strong>
+        </Link>
+        <div className="dashboard-widget success">
+          <span>今日完成</span>
+          <strong>{completedToday}</strong>
+        </div>
+        <div className="dashboard-widget warning">
+          <span>不通过</span>
+          <strong>{failCount}</strong>
+        </div>
       </section>
 
       <section className="new-review-sheet" id="new-verification">
@@ -101,7 +118,7 @@ export function Workbench() {
           <div>
             <p className="eyebrow">新建核查</p>
             <h2>添加候选人材料</h2>
-            <p>上传后将进入证据提取与确定性核验流程。</p>
+            <p>上传后按社保事实依据逐段对照简历经历。</p>
           </div>
           <span className="sheet-status">本地文件 · 安全处理</span>
         </div>
@@ -149,20 +166,34 @@ export function Workbench() {
           <Link href="/history">查看全部</Link>
         </div>
         {history.length === 0 ? (
-          <div className="empty"><span>⌁</span><strong>暂无核验记录</strong><p>完成一次核查后，记录会显示在这里。</p></div>
+          <div className="empty"><strong>暂无核验记录</strong><p>完成一次核查后，记录会显示在这里。</p></div>
         ) : (
           <div className="records-list">
             <div className="records-head">
-              <span>候选人</span><span>状态</span><span>Evidence</span><span>更新时间</span><span />
+              <span>候选人</span><span>整体结论</span><span>更新时间</span><span />
             </div>
             {history.slice(0, 6).map((item) => (
-              <Link className="history-row" href={item.status === "COMPLETED" ? `/result/${item.id}` : `/processing/${item.id}`} key={item.id}>
-                <strong>{item.candidateName || "待识别候选人"}</strong>
-                <span className={`row-status ${item.status.toLowerCase()}`}>
-                  {item.status === "COMPLETED" ? "已完成" : item.status === "FAILED" ? "处理失败" : "处理中"}
+              <Link
+                className="history-row"
+                href={item.status === "COMPLETED" ? `/result/${item.id}` : `/processing/${item.id}`}
+                key={item.id}
+              >
+                <strong>{item.candidateName || "姓名待人工确认"}</strong>
+                <span className={`tone-chip ${conclusionClass(item.overallConclusionLabel)}`}>
+                  {item.status === "FAILED"
+                    ? "处理失败"
+                    : item.status !== "COMPLETED"
+                      ? "处理中"
+                      : item.overallConclusionLabel}
                 </span>
-                <span>{item.anomalyCount ? `${item.anomalyCount} 项需关注` : "未发现异常"}</span>
-                <time>{new Date(item.createdAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</time>
+                <time>
+                  {new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN", {
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </time>
                 <i>›</i>
               </Link>
             ))}

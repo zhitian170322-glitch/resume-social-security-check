@@ -301,7 +301,17 @@ describe("simple verification main chain", () => {
           endIsPresent: true,
         },
       ],
-      socialRecords: [social("甲科技有限公司", "2025-01", null, [])],
+      socialRecords: [
+        {
+          companyRaw: "甲科技有限公司",
+          startMonth: "2025-01",
+          endMonth: null,
+          paidMonths: [],
+          paymentType: "company",
+          sourceFile: "social.pdf",
+          sourcePage: 1,
+        },
+      ],
     });
     expect(report.rows[0]?.status).toBe("NEEDS_REVIEW");
     expect(report.rows[0]?.verificationBaseline).toBeNull();

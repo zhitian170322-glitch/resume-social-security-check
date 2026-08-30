@@ -240,6 +240,13 @@ export type ResultViewModel =
       recruiterTotals: RecruiterTotals;
       recruiterSummary: RecruiterSummary;
       evidenceIssues: EvidenceIssue[];
+      monthDetails?: SimpleVerificationReport["monthDetails"];
+      monthDetailsText?: string;
+      fieldOverrides?: SimpleVerificationReport["fieldOverrides"];
+      nameStatus?: SimpleVerificationReport["nameStatus"];
+      duplicateNotice?: string | null;
+      overallConclusion?: SimpleVerificationReport["overallConclusion"];
+      overallConclusionLabel?: string;
     }
   | {
       schemaVersion: 1;
@@ -1541,6 +1548,13 @@ function buildSimpleResultViewModel(
     recruiterTotals: report.recruiterTotals,
     recruiterSummary: report.recruiterSummary,
     evidenceIssues: [],
+    monthDetails: report.monthDetails,
+    monthDetailsText: report.monthDetailsText,
+    fieldOverrides: report.fieldOverrides,
+    nameStatus: report.nameStatus,
+    duplicateNotice: report.duplicateNotice,
+    overallConclusion: report.overallConclusion,
+    overallConclusionLabel: report.overallConclusionLabel,
   };
 }
 
