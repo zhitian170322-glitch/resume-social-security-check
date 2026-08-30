@@ -66,15 +66,19 @@ if tar -tzf "$PACKAGE" | grep -E '(^|/)\.env$|(^|/)data/|(^|/)uploads/|\.db$|nod
   exit 1
 fi
 
+COMPOSE_FILE="$(tar -tzf "$PACKAGE" | grep -E '(^|/)docker-compose\.yml$' | head -1)"
+DOCKERFILE="$(tar -tzf "$PACKAGE" | grep -E '(^|/)Dockerfile$' | head -1)"
 COMPOSE_OK=0
-if tar -xOf "$PACKAGE" docker-compose.yml 2>/dev/null | grep -q "orangeito_default" \
-  && tar -xOf "$PACKAGE" docker-compose.yml 2>/dev/null | grep -q "resume-social-security-check-app-1"; then
+if [[ -n "$COMPOSE_FILE" ]] \
+  && tar -xOf "$PACKAGE" "$COMPOSE_FILE" | grep -q "orangeito_default" \
+  && tar -xOf "$PACKAGE" "$COMPOSE_FILE" | grep -q "resume-social-security-check-app-1"; then
   COMPOSE_OK=1
 fi
 DOCKERFILE_OK=0
-if tar -xOf "$PACKAGE" Dockerfile 2>/dev/null | grep -q "python3" \
-  && tar -xOf "$PACKAGE" Dockerfile 2>/dev/null | grep -q "make" \
-  && tar -xOf "$PACKAGE" Dockerfile 2>/dev/null | grep -q "g++"; then
+if [[ -n "$DOCKERFILE" ]] \
+  && tar -xOf "$PACKAGE" "$DOCKERFILE" | grep -q "python3" \
+  && tar -xOf "$PACKAGE" "$DOCKERFILE" | grep -q "make" \
+  && tar -xOf "$PACKAGE" "$DOCKERFILE" | grep -q "g++"; then
   DOCKERFILE_OK=1
 fi
 if [[ "$COMPOSE_OK" -ne 1 || "$DOCKERFILE_OK" -ne 1 ]]; then
