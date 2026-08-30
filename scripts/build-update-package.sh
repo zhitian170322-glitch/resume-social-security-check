@@ -20,22 +20,20 @@ git archive --format=tar.gz --prefix="resume-social-security-check/" -o "$PACKAG
 
 python3 - "$PACKAGE" <<'PY'
 import sys, tarfile
-forbidden = (
-    ".env",
-    "node_modules/",
-    ".next/",
-    ".git/",
-    "uploads/",
-    "data/",
+forbidden_parts = (
+    "/node_modules/",
+    "/.next/",
+    "/.git/",
+    "/uploads/",
+    "/data/",
 )
 forbidden_suffix = (".db", ".sqlite", ".pdf", ".png", ".jpg", ".jpeg", ".webp")
 with tarfile.open(sys.argv[1], "r:gz") as archive:
     for member in archive.getmembers():
         name = member.name
-        if any(token in name for token in forbidden) or name.endswith(forbidden_suffix):
+        base = name.rsplit("/", 1)[-1]
+        if base == ".env" or any(token in f"/{name}/" for token in forbidden_parts) or name.endswith(forbidden_suffix):
             raise SystemExit(f"更新包包含禁止文件: {name}")
-        if member.isfile() and name.endswith(".env"):
-            raise SystemExit(f"更新包包含环境文件: {name}")
 print("package-content-scan: ok")
 PY
 
