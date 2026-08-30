@@ -15,6 +15,18 @@ import type {
   EvidenceValidationStagePayload,
 } from "@/lib/worker-pipeline-integration";
 import { saveHumanReview } from "@/lib/human-review";
+import {
+  applyFieldOverrides,
+  isResumeOverrideField,
+  revertOverride,
+  upsertOverride,
+  type FieldOverride,
+} from "@/lib/manual-override";
+import { buildPaidMonthDetails, monthDetailsText } from "@/lib/month-details";
+import {
+  verifyResumeAndSocial,
+  type SimpleVerificationReport,
+} from "@/lib/simple-verification";
 
 export const runtime = "nodejs";
 
@@ -96,21 +108,21 @@ export async function GET(
   const resultObject =
     result && typeof result === "object" ? (result as { schemaVersion?: number }) : null;
   const verification =
-    resultObject?.schemaVersion === 4
+    resultObject?.schemaVersion === 4 || resultObject?.schemaVersion === 5
       ? null
       : latestArtifactPayload<Phase8VerificationResult>(
           task.id,
           "VERIFICATION_COMPLETE",
         );
   const derivedFacts =
-    resultObject?.schemaVersion === 4
+    resultObject?.schemaVersion === 4 || resultObject?.schemaVersion === 5
       ? null
       : latestArtifactPayload<DerivedFactsPayload>(
           task.id,
           "DERIVED_FACTS",
         );
   const validationStage =
-    resultObject?.schemaVersion === 4
+    resultObject?.schemaVersion === 4 || resultObject?.schemaVersion === 5
       ? null
       : latestArtifactPayload<EvidenceValidationStagePayload>(
           task.id,
@@ -153,6 +165,22 @@ export async function PATCH(
     retry?: boolean;
     reviewStatus?: "PENDING" | "CONFIRMED" | "REJECTED";
     reviewNote?: string;
+    manualOverride?: {
+      id: string;
+      rowIndex: number;
+      field:
+        | "resumeCompany"
+        | "socialCompany"
+        | "position"
+        | "startMonth"
+        | "endMonth"
+        | "paymentType"
+        | "unitCompany";
+      originalValue: string | null;
+      systemValue: string | null;
+      overrideValue: string | null;
+    };
+    revertOverrideId?: string;
   };
   const task = db.prepare("SELECT * FROM verification_tasks WHERE id = ?").get(id) as
     | TaskRow
@@ -197,6 +225,63 @@ export async function PATCH(
       { message: "旧版本任务不能进入新版提取流程，请创建新任务" },
       { status: 409 },
     );
+  }
+  if (body.manualOverride || body.revertOverrideId) {
+    if (task.status !== "COMPLETED") {
+      return NextResponse.json({ message: "任务完成后才能人工修正" }, { status: 409 });
+    }
+    const result = parseJson(task.result_json) as SimpleVerificationReport | null;
+    if (!result?.systemExtracted || result.schemaVersion !== 5) {
+      return NextResponse.json(
+        { message: "当前结果无法安全持久化人工修正，未改写数据库结构" },
+        { status: 409 },
+      );
+    }
+    const currentOverrides = (result.fieldOverrides ?? []) as FieldOverride[];
+    const currentRow = result.rows[body.manualOverride?.rowIndex ?? -1];
+    const targetId = body.manualOverride
+      ? isResumeOverrideField(body.manualOverride.field)
+        ? currentRow?.resume?.sourceId
+        : currentRow?.social?.sourceId
+      : undefined;
+    const nextOverrides = body.revertOverrideId
+      ? revertOverride(currentOverrides, body.revertOverrideId)
+      : upsertOverride(currentOverrides, {
+          ...body.manualOverride!,
+          targetId,
+          reviewStatus: "applied",
+        });
+    const applied = applyFieldOverrides({
+      experiences: result.systemExtracted.experiences,
+      socialRecords: result.systemExtracted.socialRecords,
+      overrides: nextOverrides,
+    });
+    const next = verifyResumeAndSocial({
+      candidateName: result.systemExtracted.candidateName,
+      socialName: result.systemExtracted.socialName,
+      experiences: applied.experiences,
+      socialRecords: applied.socialRecords,
+      duplicateNotice: result.systemExtracted.duplicateNotice,
+      overrides: nextOverrides,
+    });
+    const monthDetails = buildPaidMonthDetails(
+      applied.socialRecords,
+      nextOverrides.some((entry) => entry.reviewStatus === "applied")
+        ? "manual"
+        : "system",
+    );
+    const saved = {
+      ...next,
+      monthDetails,
+      monthDetailsText: monthDetailsText(monthDetails),
+      fieldOverrides: nextOverrides,
+      systemExtracted: result.systemExtracted,
+    };
+    const now = new Date().toISOString();
+    db.prepare(
+      `UPDATE verification_tasks SET result_json = ?, updated_at = ? WHERE id = ?`,
+    ).run(JSON.stringify(saved), now, id);
+    return NextResponse.json({ accepted: true, result: saved });
   }
   if (body.retry === true && task.status === "FAILED") {
     db.prepare(

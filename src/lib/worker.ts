@@ -34,7 +34,9 @@ import type {
 import { SocialSecurityPageClassifier } from "./social-security-page-classifier";
 import { persistSocialSecurityOCRResult } from "./social-security-evidence";
 import { extractSocialRecords } from "./social-records";
-import { extractResumeWithEvidence } from "./deepseek";
+import { extractResumeWithEvidence, isPresentMonthRaw } from "./deepseek";
+import { pageFingerprint, shouldSkipDuplicate } from "./material-dedup";
+import { buildPaidMonthDetails, monthDetailsText } from "./month-details";
 import {
   type SocialRecord,
   verifyResumeAndSocial,
@@ -80,6 +82,7 @@ type OCRStagePayload = {
     sourceFile: string;
     result: SocialSecurityOCRResult;
   }>;
+  duplicateNotice?: string | null;
 };
 
 type StructuredPayload = {
@@ -408,8 +411,15 @@ async function extractOCRStage(
       pages.filter((page) => page.sourceFile === resumeFile.original_name),
     );
   }
+  const seenFileHashes = new Set<string>();
+  const seenPageFingerprints = new Set<string>();
+  let duplicateFound = false;
   for (const file of socialFiles) {
     const data = await fileStorage.read(file.storage_key);
+    if (shouldSkipDuplicate(seenFileHashes, contentHash(data))) {
+      duplicateFound = true;
+      continue;
+    }
     const socialFileCacheKey = contentHash(
       `${PIPELINE_VERSION}:file-ocr:${file.kind}:${contentHash(data)}`,
     );
@@ -418,13 +428,22 @@ async function extractOCRStage(
       results: SocialSecurityOCRResult[];
     }>(socialFileCacheKey);
     if (cachedSocial) {
-      pages.push(...cachedSocial.pages.map((page) => ({ ...page, sourceFile: file.original_name })));
-      socialPages.push(
-        ...cachedSocial.results.map((result) => ({
-          sourceFile: file.original_name,
-          result,
-        })),
-      );
+      for (const [index, result] of cachedSocial.results.entries()) {
+        const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
+        const fingerprint = pageFingerprint(selectedText);
+        if (
+          selectedText.replace(/\s+/g, "").length >= 20 &&
+          shouldSkipDuplicate(seenPageFingerprints, fingerprint)
+        ) {
+          duplicateFound = true;
+          continue;
+        }
+        const page = cachedSocial.pages[index];
+        if (page) {
+          pages.push({ ...page, sourceFile: file.original_name });
+        }
+        socialPages.push({ sourceFile: file.original_name, result });
+      }
       continue;
     }
     const fileDocumentPages: DocumentPage[] = [];
@@ -450,6 +469,11 @@ async function extractOCRStage(
             page.page,
           );
           const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
+          const fingerprint = pageFingerprint(selectedText);
+          if (selectedText.replace(/\s+/g, "").length >= 20 && shouldSkipDuplicate(seenPageFingerprints, fingerprint)) {
+            duplicateFound = true;
+            continue;
+          }
           const confidences = result.tables
             .map((table) => table.confidence)
             .filter((value): value is number => value !== null);
@@ -501,6 +525,14 @@ async function extractOCRStage(
         1,
       );
       const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
+      const fingerprint = pageFingerprint(selectedText);
+      if (
+        selectedText.replace(/\s+/g, "").length >= 20 &&
+        shouldSkipDuplicate(seenPageFingerprints, fingerprint)
+      ) {
+        duplicateFound = true;
+        continue;
+      }
       const confidences = result.tables
         .map((table) => table.confidence)
         .filter((value): value is number => value !== null);
@@ -534,7 +566,14 @@ async function extractOCRStage(
       results: fileResults,
     });
   }
-  return { resumeSourceFile: resumeFile.original_name, pages, socialPages };
+  return {
+    resumeSourceFile: resumeFile.original_name,
+    pages,
+    socialPages,
+    duplicateNotice: duplicateFound
+      ? "检测到重复材料，已排除重复计算"
+      : null,
+  };
 }
 
 async function structureStage(
@@ -766,17 +805,46 @@ async function processTask(task: TaskRow) {
   }
   updateTask(task.id, { stage: "STRUCTURED", updated_at: new Date().toISOString() });
 
-  const experiences = structured.resume.experiences.map((experience) => ({
+  const experiences = structured.resume.experiences.map((experience, index) => ({
+    sourceId: `resume-${index}`,
     companyRaw: experience.resumeCompany.value,
     position: experience.position?.value ?? null,
     startMonth: experience.resumeStartMonth.value,
     endMonth: experience.resumeEndMonth.value,
+    endMonthRaw: experience.resumeEndMonth.rawValue ?? null,
+    endIsPresent: isPresentMonthRaw(
+      experience.resumeEndMonth.rawValue ?? experience.resumeEndMonth.sourceQuote,
+    ),
   }));
-  const report = verifyResumeAndSocial({
+  const socialRecords = structured.socialRecords.map((record, index) => ({
+    ...record,
+    sourceId: record.sourceId ?? `social-${index}`,
+  }));
+  const socialNameMatch = ocrPayload.pages
+    .map((page) => page.selectedText || page.ocrText || page.pdfText || "")
+    .join("\n")
+    .match(/姓名[:：]\s*([^\s,，。]+)/u);
+  const details = buildPaidMonthDetails(socialRecords);
+  const extracted = {
     candidateName: structured.resume.candidateName.value ?? "姓名待人工确认",
     experiences,
-    socialRecords: structured.socialRecords,
-  });
+    socialRecords,
+    socialName: socialNameMatch?.[1] ?? null,
+    duplicateNotice: ocrPayload.duplicateNotice ?? null,
+  };
+  const report = {
+    ...verifyResumeAndSocial({
+      candidateName: extracted.candidateName,
+      socialName: extracted.socialName,
+      experiences,
+      socialRecords,
+      duplicateNotice: extracted.duplicateNotice,
+    }),
+    monthDetails: details,
+    monthDetailsText: monthDetailsText(details),
+    fieldOverrides: [],
+    systemExtracted: extracted,
+  };
   writeVersionedStageArtifact({
     taskId: task.id,
     stage: "VERIFICATION_COMPLETE",

@@ -184,6 +184,9 @@ export type RecruiterComparisonRow = {
   itemText: string;
   socialStandardText: string;
   correctionReference: string;
+  hasManualOverride?: boolean;
+  verificationBaseline?: string | null;
+  endIsPresent?: boolean;
 };
 
 export type RecruiterTotals = {

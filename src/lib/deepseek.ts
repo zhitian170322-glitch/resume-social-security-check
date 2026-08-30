@@ -140,8 +140,12 @@ const RAW_MONTH_PATTERN =
   /(?<!\d)\d{4}\s*(?:[.\-/年]\s*|(?=\d{2}(?:\D|$)))(?:0?[1-9]|1[0-2])\s*月?(?!\d)/g;
 const PRESENT_PATTERN = /至今|目前|present/iu;
 
+export function isPresentMonthRaw(raw: string | null | undefined): boolean {
+  return Boolean(raw && PRESENT_PATTERN.test(raw));
+}
+
 function normalizedMonth(raw: string, currentMonth: string) {
-  if (PRESENT_PATTERN.test(raw)) return currentMonth;
+  if (PRESENT_PATTERN.test(raw)) return null;
   const match = raw
     .trim()
     .match(
@@ -215,9 +219,6 @@ function monthTokens(text: string | null, currentMonth: string) {
     if (normalizedValue) {
       tokens.push({ rawValue: match[0], normalizedValue });
     }
-  }
-  for (const match of text.matchAll(/至今|目前|present/giu)) {
-    tokens.push({ rawValue: match[0], normalizedValue: currentMonth });
   }
   return tokens;
 }

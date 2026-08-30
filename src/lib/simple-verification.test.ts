@@ -259,4 +259,76 @@ describe("simple verification main chain", () => {
     });
     expect(report.recruiterSummary.fullText).toContain("重叠月份：1个月");
   });
+
+  it("uses the last social paid month as the 至今 verification baseline", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      socialName: "张三",
+      experiences: [
+        {
+          companyRaw: "甲科技有限公司",
+          position: "工程师",
+          startMonth: "2025-01",
+          endMonth: null,
+          endIsPresent: true,
+        },
+      ],
+      socialRecords: [
+        social("甲科技有限公司", "2025-01", "2026-07", [
+          ...months("2025-01", 12),
+          ...months("2026-01", 7),
+        ]),
+      ],
+    });
+    expect(report.rows[0]?.verificationBaseline).toBe("2026-07");
+    expect(report.rows[0]?.endMonthDifference).toBe(0);
+    expect(report.recruiterTable[0]?.resumePeriod).toContain("至今");
+    expect(report.recruiterTable[0]?.itemText).toContain("简历结束：至今");
+    expect(report.recruiterTable[0]?.itemText).toContain("社保截止：2026-07");
+    expect(report.recruiterTable[0]?.itemText).toContain("核验基准：2026-07");
+    expect(report.overallConclusion).toBe("PASS");
+  });
+
+  it("marks 至今 for review when the paired social end cannot be determined", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      experiences: [
+        {
+          companyRaw: "甲科技有限公司",
+          position: "工程师",
+          startMonth: "2025-01",
+          endMonth: null,
+          endIsPresent: true,
+        },
+      ],
+      socialRecords: [social("甲科技有限公司", "2025-01", null, [])],
+    });
+    expect(report.rows[0]?.status).toBe("NEEDS_REVIEW");
+    expect(report.rows[0]?.verificationBaseline).toBeNull();
+  });
+
+  it("blocks auto pass when resume and social names differ", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      socialName: "李四",
+      experiences: [experience("甲科技有限公司", "2020-01", "2021-05")],
+      socialRecords: [social("甲科技有限公司", "2020-01", "2021-05", months("2020-01", 17))],
+    });
+    expect(report.nameStatus).toBe("mismatch");
+    expect(report.rows[0]?.status).toBe("PASS");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
+    expect(report.recruiterTable[0]?.resumeCompany).toBe("甲科技有限公司");
+  });
+
+  it("blocks auto pass when one name cannot be identified", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      socialName: null,
+      experiences: [experience("甲科技有限公司", "2020-01", "2021-05")],
+      socialRecords: [social("甲科技有限公司", "2020-01", "2021-05", months("2020-01", 17))],
+    });
+    expect(report.nameStatus).toBe("unknown");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
+  });
 });
+

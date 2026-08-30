@@ -8,6 +8,7 @@ import type {
 } from "./result-view-model";
 
 export type ResumeExperience = {
+  sourceId?: string;
   companyRaw: string | null;
   position: string | null;
   startMonth: string | null;
@@ -17,6 +18,7 @@ export type ResumeExperience = {
 };
 
 export type SocialRecord = {
+  sourceId?: string;
   companyRaw: string | null;
   companyNormalized?: string;
   unitCode?: string | null;
@@ -39,6 +41,8 @@ export type SimpleComparisonRow = {
   endMonthDifference: number | null;
   status: RecruiterRowStatus;
   reason: string;
+  verificationBaseline?: string | null;
+  hasManualOverride?: boolean;
 };
 
 export type OverallConclusion = "PASS" | "FAIL" | "NEEDS_REVIEW";
@@ -60,6 +64,25 @@ export type SimpleVerificationReport = {
   socialName?: string | null;
   nameStatus?: "match" | "mismatch" | "unknown";
   duplicateNotice?: string | null;
+  monthDetails?: Array<{
+    month: string;
+    unitCode: string | null;
+    companyRaw: string | null;
+    paymentType: SocialRecord["paymentType"];
+    sourceFile?: string;
+    sourcePage?: number;
+    origin: "system" | "manual";
+  }>;
+  monthDetailsText?: string;
+  fieldOverrides?: Array<Record<string, unknown>>;
+  overrides?: Array<Record<string, unknown>>;
+  systemExtracted?: {
+    candidateName: string;
+    experiences: ResumeExperience[];
+    socialRecords: SocialRecord[];
+    socialName: string | null;
+    duplicateNotice: string | null;
+  };
 };
 
 const PERSONAL_PATTERN = /个人参保|个人缴费|灵活就业|个人缴费窗口/u;
@@ -101,10 +124,10 @@ export function inferPaymentType(
   companyRaw: string | null | undefined,
   explicit?: "company" | "personal" | "unknown",
 ): "company" | "personal" | "unknown" {
+  if (explicit === "personal" || explicit === "company" || explicit === "unknown") {
+    return explicit;
+  }
   if (PERSONAL_PATTERN.test(companyRaw ?? "")) return "personal";
-  if (explicit === "personal") return "personal";
-  if (explicit === "unknown") return "unknown";
-  if (explicit === "company" && companyRaw?.trim()) return "company";
   return companyRaw?.trim() ? "company" : "unknown";
 }
 
@@ -350,7 +373,14 @@ function display(value: string | null | undefined) {
   return value?.trim() ? value : "—";
 }
 
-function periodLabel(start: string | null | undefined, end: string | null | undefined) {
+function periodLabel(
+  start: string | null | undefined,
+  end: string | null | undefined,
+  endIsPresent?: boolean,
+) {
+  if (endIsPresent) {
+    return `${start ?? "待人工确认"} 至 至今`;
+  }
   if (!start && !end) return "—";
   return `${start ?? "待人工确认"} 至 ${end ?? "待人工确认"}`;
 }
@@ -389,7 +419,11 @@ export function buildRecruiterRowFromSimple(
   const resumeCompany = display(row.resume?.companyRaw);
   const socialCompany = display(row.social?.companyRaw);
   const position = display(row.resume?.position);
-  const resumePeriod = periodLabel(row.resume?.startMonth, row.resume?.endMonth);
+  const resumePeriod = periodLabel(
+    row.resume?.startMonth,
+    row.resume?.endMonth,
+    row.resume?.endIsPresent,
+  );
   const socialPeriod = periodLabel(row.social?.startMonth, row.social?.endMonth);
   const paidMonths = uniquePaidMonths(row.social?.paidMonths ?? []);
   const paidMonthCount = paidMonths.length ? paidMonths.length : null;
@@ -424,6 +458,13 @@ export function buildRecruiterRowFromSimple(
         `实际缴纳：${paidMonthCount === null ? "无法从材料确定" : `${paidMonthCount}个月`}`,
       ].join("\n")
     : "待人工确认";
+  const presentLines = row.resume?.endIsPresent
+    ? [
+        `简历结束：至今`,
+        `社保截止：${row.social?.endMonth ?? "待人工确认"}`,
+        `核验基准：${row.verificationBaseline ?? "待人工确认"}`,
+      ]
+    : [];
   const itemText = [
     `候选人：${candidateName}`,
     `简历：${resumeCompany}`,
@@ -431,12 +472,14 @@ export function buildRecruiterRowFromSimple(
     `简历时间：${resumePeriod}`,
     `社保：${socialCompany}`,
     `社保时间：${socialPeriod}`,
+    ...presentLines,
     `公司是否一致：${companyConsistentLabel}`,
     `开始月份差：${startLabel}`,
     `结束月份差：${endLabel}`,
     `结果：${statusLabels[row.status]}`,
     `原因：${row.reason}`,
     `实际社保月数：${paidMonthCount === null ? "无法从材料确定" : `${paidMonthCount}个月`}`,
+    ...(row.hasManualOverride ? ["已人工修正"] : []),
   ].join("\n");
   return {
     id: `simple-${index}`,
@@ -461,6 +504,9 @@ export function buildRecruiterRowFromSimple(
     itemText,
     socialStandardText,
     correctionReference,
+    hasManualOverride: Boolean(row.hasManualOverride),
+    verificationBaseline: row.verificationBaseline ?? null,
+    endIsPresent: Boolean(row.resume?.endIsPresent),
   };
 }
 
@@ -508,10 +554,26 @@ export function buildSimpleTotals(rows: SimpleComparisonRow[]): RecruiterTotals 
   };
 }
 
+function overrideCopyLines(overrides: Array<Record<string, unknown>> | undefined) {
+  return (overrides ?? [])
+    .filter((entry) => entry.reviewStatus === "applied")
+    .map((entry) => {
+      const field = String(entry.field ?? "字段");
+      const systemValue = entry.systemValue == null || entry.systemValue === ""
+        ? "待人工确认"
+        : String(entry.systemValue);
+      const overrideValue = entry.overrideValue == null || entry.overrideValue === ""
+        ? "待人工确认"
+        : String(entry.overrideValue);
+      return `人工修正 ${field}：系统识别=${systemValue}；人工修正=${overrideValue}`;
+    });
+}
+
 function buildSummary(
   candidateName: string,
   rows: RecruiterComparisonRow[],
   totals: RecruiterTotals,
+  overrides?: Array<Record<string, unknown>>,
 ): RecruiterSummary {
   const passCount = rows.filter((row) => row.rowStatus === "PASS").length;
   const failCount = rows.filter((row) => row.rowStatus === "FAIL").length;
@@ -551,6 +613,7 @@ function buildSummary(
       ? [`重叠月份：${totals.overlapMonthCount}个月`]
       : []),
     `定薪有效缴纳：${totals.salaryEffectiveMonthCount}个月`,
+    ...overrideCopyLines(overrides),
     ...rows.flatMap((row) => ["", `${row.index}.`, row.itemText]),
   ].join("\n");
   return {
@@ -568,13 +631,64 @@ function buildSummary(
   };
 }
 
+function namesMatch(left: string | null | undefined, right: string | null | undefined) {
+  const a = (left ?? "").normalize("NFKC").replace(/\s+/gu, "").trim();
+  const b = (right ?? "").normalize("NFKC").replace(/\s+/gu, "").trim();
+  if (!a || !b) return null;
+  return a === b;
+}
+
+function resolvePresentEnd(row: SimpleComparisonRow): SimpleComparisonRow {
+  if (!row.resume?.endIsPresent) return row;
+  const baseline =
+    uniquePaidMonths(row.social?.paidMonths ?? []).at(-1) ??
+    row.social?.endMonth ??
+    null;
+  if (!baseline) {
+    return {
+      ...row,
+      verificationBaseline: null,
+      ...classifyRow(
+        { ...row.resume, endMonth: null },
+        row.social,
+      ),
+    };
+  }
+  const resume = { ...row.resume, endMonth: baseline };
+  return {
+    ...row,
+    resume,
+    verificationBaseline: baseline,
+    ...classifyRow(resume, row.social),
+  };
+}
+
 export function verifyResumeAndSocial(input: {
   candidateName: string;
+  socialName?: string | null;
   experiences: ResumeExperience[];
   socialRecords: SocialRecord[];
   verifiedAt?: string;
+  duplicateNotice?: string | null;
+  overrides?: Array<Record<string, unknown>>;
+  hasManualOverride?: boolean;
 }): SimpleVerificationReport {
-  const rows = pairResumeAndSocial(input.experiences, input.socialRecords);
+  const appliedOverrides = (input.overrides ?? []).filter(
+    (entry) => entry.reviewStatus === "applied",
+  );
+  const rows = pairResumeAndSocial(input.experiences, input.socialRecords)
+    .map(resolvePresentEnd)
+    .map((row, index) => ({
+      ...row,
+      hasManualOverride: appliedOverrides.some((entry) => {
+        const targetId = typeof entry.targetId === "string" ? entry.targetId : "";
+        return (
+          (targetId &&
+            (targetId === row.resume?.sourceId || targetId === row.social?.sourceId)) ||
+          (!targetId && entry.rowIndex === index)
+        );
+      }),
+    }));
   const recruiterTable = rows.map((row, index) =>
     buildRecruiterRowFromSimple(row, index, input.candidateName),
   );
@@ -583,7 +697,24 @@ export function verifyResumeAndSocial(input: {
     input.candidateName,
     recruiterTable,
     recruiterTotals,
+    input.overrides,
   );
+  const nameCompared = namesMatch(input.candidateName, input.socialName);
+  const nameStatus: "match" | "mismatch" | "unknown" =
+    nameCompared === true ? "match" : nameCompared === false ? "mismatch" : "unknown";
+  let overallConclusion = recruiterSummary.conclusion;
+  if (nameStatus !== "match" && overallConclusion === "PASS") {
+    overallConclusion = "NEEDS_REVIEW";
+  }
+  const overallConclusionLabel =
+    overallConclusion === "PASS"
+      ? "通过"
+      : overallConclusion === "FAIL"
+        ? "不通过"
+        : "待人工确认";
+  recruiterSummary.conclusion = overallConclusion;
+  recruiterSummary.conclusionLabel = overallConclusionLabel;
+  recruiterSummary.headline = `整体结论：${overallConclusionLabel}`;
   return {
     schemaVersion: 5,
     pipeline: "simple-v5",
@@ -595,8 +726,14 @@ export function verifyResumeAndSocial(input: {
     recruiterTable,
     recruiterTotals,
     recruiterSummary,
-    overallConclusion: recruiterSummary.conclusion,
-    overallConclusionLabel: recruiterSummary.conclusionLabel,
+    overallConclusion,
+    overallConclusionLabel,
+    resumeName: input.candidateName,
+    socialName: input.socialName ?? null,
+    nameStatus,
+    duplicateNotice: input.duplicateNotice ?? null,
+    fieldOverrides: input.overrides ?? [],
+    overrides: input.overrides ?? [],
   };
 }
 
