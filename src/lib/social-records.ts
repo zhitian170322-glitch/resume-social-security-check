@@ -10,6 +10,15 @@ import {
   type SocialRecord,
 } from "./simple-verification";
 import { inclusiveMonthRange } from "./social-security-evidence";
+import {
+  companyFromMappedName,
+  isUnitCode,
+  stripRegionLabelPrefix,
+} from "./company-cleanup";
+import {
+  aggregateMonthlyByUnitCode,
+  buildUnitCodeMap,
+} from "./unit-code-map";
 
 const COMPANY_PATTERN =
   /(?:[\u4e00-\u9fffA-Za-z0-9（）()·•]+?(?:公司|集团|事务所|中心|工厂|银行|学校|医院|合作社)|(?:个人参保|个人缴费窗口|灵活就业)[^\n]{0,20})/u;
@@ -31,6 +40,13 @@ function statedCount(text: string): number | null {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function cleanedCompany(raw: string | null | undefined, quote?: string) {
+  if (!raw || isUnitCode(raw)) {
+    return { companyRaw: null as string | null, sourceQuote: quote ?? raw ?? "" };
+  }
+  return companyFromMappedName(raw, quote ?? raw);
+}
+
 export function extractSocialRecordsFromRawText(
   rawText: string,
   sourceFile: string,
@@ -46,7 +62,7 @@ export function extractSocialRecordsFromRawText(
 
   for (const line of lines) {
     const companyMatch = line.match(COMPANY_PATTERN);
-    const companyRaw = companyMatch?.[0]?.trim() || null;
+    const cleaned = cleanedCompany(companyMatch?.[0] ?? null, line);
     const months = [
       ...line.matchAll(
         /(?:19|20)\d{2}\s*(?:年|[-/.])\s*(?:0?[1-9]|1[0-2])\s*月?/gu,
@@ -55,25 +71,26 @@ export function extractSocialRecordsFromRawText(
       .map((match) => parseOCRMonth(match[0]))
       .filter((month): month is string => Boolean(month));
     const unique = uniquePaidMonths(months);
-    if (!companyRaw && !unique.length) continue;
+    if (!cleaned.companyRaw && !unique.length) continue;
     const startMonth = unique[0] ?? null;
     const endMonth = unique.at(-1) ?? null;
     const hasRange = /(?:~|～|至|—|–)/u.test(line);
     const paidMonths =
       hasRange && startMonth && endMonth
-        ? unique.length === 2 && count === inclusiveMonthRange(startMonth, endMonth).length
+        ? unique.length === 2 &&
+          count === inclusiveMonthRange(startMonth, endMonth).length
           ? inclusiveMonthRange(startMonth, endMonth)
           : unique
         : unique;
     records.push({
-      companyRaw,
+      companyRaw: cleaned.companyRaw,
       startMonth,
       endMonth,
       paidMonths,
-      paymentType: inferPaymentType(companyRaw),
+      paymentType: inferPaymentType(cleaned.companyRaw),
       sourceFile,
       sourcePage,
-      sourceQuote: line.slice(0, 240),
+      sourceQuote: line.slice(0, 400),
     });
   }
 
@@ -86,7 +103,7 @@ export function extractSocialRecordsFromRawText(
       paymentType: "unknown",
       sourceFile,
       sourcePage,
-      sourceQuote: blob.slice(0, 240) || undefined,
+      sourceQuote: blob.slice(0, 400) || undefined,
     });
   }
   return records;
@@ -102,20 +119,44 @@ function fromParser(
       : ocrResultFromRawText(ocr),
     sourceFile,
   });
-  return parsed.records.map((record) => ({
-    companyRaw: record.companyRaw?.trim() || null,
-    startMonth: record.startMonth || null,
-    endMonth: record.endMonth || null,
-    paidMonths: uniquePaidMonths(record.paidMonths ?? []),
+  return parsed.records.map((record) => {
+    const cleaned = cleanedCompany(record.companyRaw, record.source.quote);
+    return {
+      companyRaw: cleaned.companyRaw,
+      startMonth: record.startMonth || null,
+      endMonth: record.endMonth || null,
+      paidMonths: uniquePaidMonths(record.paidMonths ?? []),
+      paymentType: inferPaymentType(cleaned.companyRaw),
+      sourceFile: record.source.file,
+      sourcePage: record.source.page,
+      sourceQuote: record.source.quote || quoteFor(record),
+      statedPaidMonthCount: record.statedPaidMonthCount,
+    };
+  });
+}
+
+function fromUnitCodes(
+  ocr: SocialSecurityOCRResult,
+  sourceFile: string,
+): SocialRecord[] {
+  const mapped = buildUnitCodeMap({ ocr, sourceFile });
+  return aggregateMonthlyByUnitCode(mapped.monthly, mapped.map).map((record) => ({
+    companyRaw: record.companyRaw,
+    unitCode: record.unitCode,
+    mappingStatus: record.mappingStatus,
+    startMonth: record.startMonth,
+    endMonth: record.endMonth,
+    paidMonths: record.paidMonths,
     paymentType: inferPaymentType(record.companyRaw),
-    sourceFile: record.source.file,
-    sourcePage: record.source.page,
-    sourceQuote: record.source.quote || quoteFor(record),
+    sourceFile: record.sourceFile ?? sourceFile,
+    sourcePage: record.sourcePage ?? ocr.page,
+    sourceQuote: record.sourceQuote,
   }));
 }
 
 function recordKey(record: SocialRecord) {
   return [
+    record.unitCode || "",
     record.companyRaw?.trim() || "",
     record.startMonth || "",
     record.endMonth || "",
@@ -135,6 +176,8 @@ export function mergeSocialRecords(groups: SocialRecord[][]): SocialRecord[] {
       merged.set(key, {
         ...current,
         companyRaw: current.companyRaw ?? record.companyRaw,
+        unitCode: current.unitCode ?? record.unitCode,
+        mappingStatus: current.mappingStatus ?? record.mappingStatus,
         startMonth: current.startMonth ?? record.startMonth,
         endMonth: current.endMonth ?? record.endMonth,
         paidMonths: uniquePaidMonths([
@@ -145,7 +188,11 @@ export function mergeSocialRecords(groups: SocialRecord[][]): SocialRecord[] {
         sourceFile: current.sourceFile ?? record.sourceFile,
         sourcePage: current.sourcePage ?? record.sourcePage,
         paymentType:
-          current.paymentType === "unknown" ? record.paymentType : current.paymentType,
+          current.paymentType === "unknown"
+            ? record.paymentType
+            : current.paymentType,
+        statedPaidMonthCount:
+          current.statedPaidMonthCount ?? record.statedPaidMonthCount,
       });
     }
   }
@@ -162,12 +209,29 @@ export function extractSocialRecords(input: {
     input.sourceFile,
     input.ocr.page,
   );
-  const merged = mergeSocialRecords([fromTablesAndText, fromRawText]);
-  return merged.filter(
-    (record) =>
-      record.companyRaw ||
-      record.startMonth ||
-      record.endMonth ||
-      record.paidMonths.length,
-  );
+  const fromCodes = fromUnitCodes(input.ocr, input.sourceFile);
+  const merged = mergeSocialRecords([fromCodes, fromTablesAndText, fromRawText]);
+  return merged
+    .map((record) => {
+      const cleaned = cleanedCompany(record.companyRaw, record.sourceQuote);
+      return {
+        ...record,
+        companyRaw: cleaned.companyRaw,
+        companyNormalized: cleaned.companyRaw
+          ? stripRegionLabelPrefix(cleaned.companyRaw)
+              .normalize("NFKC")
+              .replace(/\s+/gu, " ")
+              .trim()
+          : "",
+        paymentType: inferPaymentType(cleaned.companyRaw, record.paymentType),
+      };
+    })
+    .filter(
+      (record) =>
+        record.companyRaw ||
+        record.unitCode ||
+        record.startMonth ||
+        record.endMonth ||
+        record.paidMonths.length,
+    );
 }

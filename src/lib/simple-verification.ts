@@ -12,14 +12,20 @@ export type ResumeExperience = {
   position: string | null;
   startMonth: string | null;
   endMonth: string | null;
+  endMonthRaw?: string | null;
+  endIsPresent?: boolean;
 };
 
 export type SocialRecord = {
   companyRaw: string | null;
+  companyNormalized?: string;
+  unitCode?: string | null;
+  mappingStatus?: "mapped" | "needs_review" | "missing";
   startMonth: string | null;
   endMonth: string | null;
   paidMonths: string[];
   paymentType: "company" | "personal" | "unknown";
+  statedPaidMonthCount?: number | null;
   sourceFile?: string;
   sourcePage?: number;
   sourceQuote?: string;
@@ -35,9 +41,11 @@ export type SimpleComparisonRow = {
   reason: string;
 };
 
+export type OverallConclusion = "PASS" | "FAIL" | "NEEDS_REVIEW";
+
 export type SimpleVerificationReport = {
-  schemaVersion: 4;
-  pipeline: "simple-v2";
+  schemaVersion: 4 | 5;
+  pipeline: "simple-v2" | "simple-v5";
   candidateName: string;
   verifiedAt: string;
   experiences: ResumeExperience[];
@@ -46,6 +54,12 @@ export type SimpleVerificationReport = {
   recruiterTable: RecruiterComparisonRow[];
   recruiterTotals: RecruiterTotals;
   recruiterSummary: RecruiterSummary;
+  overallConclusion: OverallConclusion;
+  overallConclusionLabel: string;
+  resumeName?: string | null;
+  socialName?: string | null;
+  nameStatus?: "match" | "mismatch" | "unknown";
+  duplicateNotice?: string | null;
 };
 
 const PERSONAL_PATTERN = /个人参保|个人缴费|灵活就业|个人缴费窗口/u;
@@ -87,10 +101,10 @@ export function inferPaymentType(
   companyRaw: string | null | undefined,
   explicit?: "company" | "personal" | "unknown",
 ): "company" | "personal" | "unknown" {
-  if (explicit === "personal" || PERSONAL_PATTERN.test(companyRaw ?? "")) {
-    return "personal";
-  }
-  if (explicit === "company") return "company";
+  if (PERSONAL_PATTERN.test(companyRaw ?? "")) return "personal";
+  if (explicit === "personal") return "personal";
+  if (explicit === "unknown") return "unknown";
+  if (explicit === "company" && companyRaw?.trim()) return "company";
   return companyRaw?.trim() ? "company" : "unknown";
 }
 
@@ -99,21 +113,6 @@ function periodDistance(resume: ResumeExperience, social: SocialRecord): number 
   const end = monthDifference(social.endMonth, resume.endMonth);
   if (start === null && end === null) return Number.POSITIVE_INFINITY;
   return Math.abs(start ?? 0) + Math.abs(end ?? 0);
-}
-
-function periodsOverlap(resume: ResumeExperience, social: SocialRecord): boolean {
-  if (
-    !resume.startMonth ||
-    !resume.endMonth ||
-    !social.startMonth ||
-    !social.endMonth
-  ) {
-    return false;
-  }
-  return (
-    monthIndex(resume.startMonth) <= monthIndex(social.endMonth) &&
-    monthIndex(social.startMonth) <= monthIndex(resume.endMonth)
-  );
 }
 
 function classifyRow(
@@ -142,9 +141,9 @@ function classifyRow(
       companyConsistent: null,
       startMonthDifference: null,
       endMonthDifference: null,
-      status: personal ? "NEEDS_REVIEW" : "SOCIAL_ONLY",
+      status: "SOCIAL_ONLY",
       reason: personal
-        ? "个人参保或灵活就业，不自动计入工作经历和定薪年限"
+        ? "个人参保或灵活就业，简历未体现该缴纳记录"
         : "社保存在简历未体现的缴纳单位",
     };
   }
@@ -161,10 +160,12 @@ function classifyRow(
   const companyConsistent = companiesMatch(resume.companyRaw, social.companyRaw);
   const startMonthDifference = monthDifference(social.startMonth, resume.startMonth);
   const endMonthDifference = monthDifference(social.endMonth, resume.endMonth);
-  const personal = inferPaymentType(social.companyRaw, social.paymentType) === "personal";
+  const paymentType = inferPaymentType(social.companyRaw, social.paymentType);
+  const personal = paymentType === "personal";
   const missingCompany = companyConsistent === null;
   const missingStart = !resume.startMonth || !social.startMonth;
   const missingEnd = !resume.endMonth || !social.endMonth;
+  const mappingUncertain = social.mappingStatus === "needs_review";
 
   if (personal) {
     return {
@@ -173,6 +174,18 @@ function classifyRow(
       endMonthDifference,
       status: "NEEDS_REVIEW",
       reason: "个人参保或灵活就业，不自动计入工作经历和定薪年限",
+    };
+  }
+  if (paymentType === "unknown" || mappingUncertain) {
+    return {
+      companyConsistent,
+      startMonthDifference,
+      endMonthDifference,
+      status: "NEEDS_REVIEW",
+      reason:
+        paymentType === "unknown"
+          ? "缴费类型待确认"
+          : "单位编号对应公司待人工确认",
     };
   }
   if (missingCompany || missingStart || missingEnd) {
@@ -223,54 +236,111 @@ function classifyRow(
   };
 }
 
+function exactPeriodMatch(resume: ResumeExperience, social: SocialRecord): boolean {
+  return Boolean(
+    resume.startMonth &&
+      resume.endMonth &&
+      social.startMonth &&
+      social.endMonth &&
+      resume.startMonth === social.startMonth &&
+      resume.endMonth === social.endMonth,
+  );
+}
+
 export function pairResumeAndSocial(
   experiences: ResumeExperience[],
   socialRecords: SocialRecord[],
 ): SimpleComparisonRow[] {
   const usedSocial = new Set<number>();
+  const usedResume = new Set<number>();
+  const ambiguousSocial = new Set<number>();
   const rows: SimpleComparisonRow[] = [];
 
-  const takeBest = (
-    resume: ResumeExperience,
-    predicate: (social: SocialRecord, index: number) => boolean,
-  ) => {
-    const candidates = socialRecords
+  const unused = (index: number) => !usedSocial.has(index) && !ambiguousSocial.has(index);
+
+  for (const [resumeIndex, resume] of experiences.entries()) {
+    const companyCandidates = socialRecords
       .map((social, index) => ({ social, index }))
-      .filter(({ social, index }) => !usedSocial.has(index) && predicate(social, index))
+      .filter(
+        ({ social, index }) =>
+          unused(index) && companiesMatch(resume.companyRaw, social.companyRaw) === true,
+      )
       .sort(
         (left, right) =>
           periodDistance(resume, left.social) - periodDistance(resume, right.social),
       );
-    return candidates[0] ?? null;
-  };
-
-  for (const resume of experiences) {
-    const exact = takeBest(
-      resume,
-      (social) => companiesMatch(resume.companyRaw, social.companyRaw) === true,
-    );
-    const overlapped =
-      exact ??
-      takeBest(
+    if (companyCandidates.length > 1) {
+      usedResume.add(resumeIndex);
+      for (const candidate of companyCandidates) ambiguousSocial.add(candidate.index);
+      rows.push({
         resume,
-        (social) =>
-          inferPaymentType(social.companyRaw, social.paymentType) !== "personal" &&
-          periodsOverlap(resume, social),
-      );
-    if (!overlapped) {
-      rows.push({ resume, social: null, ...classifyRow(resume, null) });
+        social: null,
+        companyConsistent: null,
+        startMonthDifference: null,
+        endMonthDifference: null,
+        status: "NEEDS_REVIEW",
+        reason: "多个社保记录可能对应同一段经历，待人工确认",
+      });
       continue;
     }
-    usedSocial.add(overlapped.index);
-    rows.push({
-      resume,
-      social: overlapped.social,
-      ...classifyRow(resume, overlapped.social),
-    });
+    if (companyCandidates.length === 1) {
+      usedResume.add(resumeIndex);
+      usedSocial.add(companyCandidates[0].index);
+      rows.push({
+        resume,
+        social: companyCandidates[0].social,
+        ...classifyRow(resume, companyCandidates[0].social),
+      });
+    }
+  }
+
+  for (const [resumeIndex, resume] of experiences.entries()) {
+    if (usedResume.has(resumeIndex)) continue;
+    const dateCandidates = socialRecords
+      .map((social, index) => ({ social, index }))
+      .filter(({ social, index }) => unused(index) && exactPeriodMatch(resume, social));
+    if (dateCandidates.length > 1) {
+      usedResume.add(resumeIndex);
+      for (const candidate of dateCandidates) ambiguousSocial.add(candidate.index);
+      rows.push({
+        resume,
+        social: null,
+        companyConsistent: null,
+        startMonthDifference: null,
+        endMonthDifference: null,
+        status: "NEEDS_REVIEW",
+        reason: "起止月份一致但存在多个对应记录，待人工确认",
+      });
+      continue;
+    }
+    if (dateCandidates.length === 1) {
+      usedResume.add(resumeIndex);
+      usedSocial.add(dateCandidates[0].index);
+      rows.push({
+        resume,
+        social: dateCandidates[0].social,
+        ...classifyRow(resume, dateCandidates[0].social),
+      });
+      continue;
+    }
+    usedResume.add(resumeIndex);
+    rows.push({ resume, social: null, ...classifyRow(resume, null) });
   }
 
   for (const [index, social] of socialRecords.entries()) {
     if (usedSocial.has(index)) continue;
+    if (ambiguousSocial.has(index)) {
+      rows.push({
+        resume: null,
+        social,
+        companyConsistent: null,
+        startMonthDifference: null,
+        endMonthDifference: null,
+        status: "NEEDS_REVIEW",
+        reason: "配对存在歧义，待人工确认",
+      });
+      continue;
+    }
     rows.push({ resume: null, social, ...classifyRow(null, social) });
   }
   return rows;
@@ -405,21 +475,32 @@ function formatDuration(monthCount: number) {
 export function buildSimpleTotals(rows: SimpleComparisonRow[]): RecruiterTotals {
   const companyMonths = new Set<string>();
   const personalMonths = new Set<string>();
+  const unknownMonths = new Set<string>();
   for (const row of rows) {
     if (!row.social) continue;
     const months = uniquePaidMonths(row.social.paidMonths);
-    const personal =
-      inferPaymentType(row.social.companyRaw, row.social.paymentType) ===
-      "personal";
+    const paymentType = inferPaymentType(
+      row.social.companyRaw,
+      row.social.paymentType,
+    );
     for (const month of months) {
-      if (personal) personalMonths.add(month);
+      if (paymentType === "personal") personalMonths.add(month);
+      else if (paymentType === "unknown") unknownMonths.add(month);
       else companyMonths.add(month);
     }
   }
-  const actualMonths = new Set([...companyMonths, ...personalMonths]);
+  const actualMonths = new Set([
+    ...companyMonths,
+    ...personalMonths,
+    ...unknownMonths,
+  ]);
+  const classified =
+    companyMonths.size + personalMonths.size + unknownMonths.size;
   return {
     companyPaidMonthCount: companyMonths.size,
     personalPaidMonthCount: personalMonths.size,
+    unknownPaidMonthCount: unknownMonths.size,
+    overlapMonthCount: Math.max(0, classified - actualMonths.size),
     actualPaidMonthCount: actualMonths.size,
     salaryEffectiveMonthCount: companyMonths.size,
     actualPaidDuration: formatDuration(actualMonths.size),
@@ -463,6 +544,12 @@ function buildSummary(
     `折算年限：${totals.actualPaidDuration}`,
     `公司缴纳：${totals.companyPaidMonthCount}个月`,
     `个人缴纳：${totals.personalPaidMonthCount}个月`,
+    ...(totals.unknownPaidMonthCount
+      ? [`缴费类型待确认：${totals.unknownPaidMonthCount}个月`]
+      : []),
+    ...(totals.overlapMonthCount
+      ? [`重叠月份：${totals.overlapMonthCount}个月`]
+      : []),
     `定薪有效缴纳：${totals.salaryEffectiveMonthCount}个月`,
     ...rows.flatMap((row) => ["", `${row.index}.`, row.itemText]),
   ].join("\n");
@@ -498,8 +585,8 @@ export function verifyResumeAndSocial(input: {
     recruiterTotals,
   );
   return {
-    schemaVersion: 4,
-    pipeline: "simple-v2",
+    schemaVersion: 5,
+    pipeline: "simple-v5",
     candidateName: input.candidateName,
     verifiedAt: input.verifiedAt ?? new Date().toISOString(),
     experiences: input.experiences,
@@ -508,6 +595,8 @@ export function verifyResumeAndSocial(input: {
     recruiterTable,
     recruiterTotals,
     recruiterSummary,
+    overallConclusion: recruiterSummary.conclusion,
+    overallConclusionLabel: recruiterSummary.conclusionLabel,
   };
 }
 

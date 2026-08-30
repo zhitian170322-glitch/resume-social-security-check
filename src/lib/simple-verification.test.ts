@@ -151,10 +151,11 @@ describe("simple verification main chain", () => {
     expect(report.recruiterSummary.fullText).toContain("折算年限：7年1个月");
     expect(report.recruiterSummary.fullText).not.toMatch(/约7\.08年/);
     expect(report.recruiterTable[2]).toMatchObject({
-      rowStatus: "NEEDS_REVIEW",
+      rowStatus: "SOCIAL_ONLY",
       socialCompany: "社保局个人缴费窗口",
     });
-    expect(report.recruiterSummary.conclusion).not.toBe("PASS");
+    expect(report.overallConclusion).toBe("FAIL");
+    expect(report.recruiterSummary.conclusion).toBe(report.overallConclusion);
   });
 
   it("keeps the summary consistent with row statuses and still copyable when overall fail", () => {
@@ -195,5 +196,67 @@ describe("simple verification main chain", () => {
     expect(records[0]?.companyRaw).toContain("甲科技有限公司");
     expect(records[0]?.startMonth).toBe("2020-01");
     expect(records[0]?.endMonth).toBe("2021-05");
+  });
+
+  it("pairs different companies on a unique identical period and still fails company match", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      experiences: [experience("甲科技有限公司", "2020-01", "2021-05")],
+      socialRecords: [social("乙科技有限公司", "2020-01", "2021-05", months("2020-01", 17))],
+    });
+    expect(report.recruiterTable).toHaveLength(1);
+    expect(report.recruiterTable[0]).toMatchObject({
+      resumeCompany: "甲科技有限公司",
+      socialCompany: "乙科技有限公司",
+      companyConsistentLabel: "不一致",
+      rowStatus: "FAIL",
+    });
+  });
+
+  it("does not classify a missing company as personal", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      experiences: [],
+      socialRecords: [
+        {
+          companyRaw: null,
+          unitCode: "470855",
+          mappingStatus: "missing",
+          startMonth: "2025-01",
+          endMonth: "2025-01",
+          paidMonths: ["2025-01"],
+          paymentType: "unknown",
+          sourceFile: "social.pdf",
+          sourcePage: 1,
+        },
+      ],
+    });
+    expect(report.socialRecords[0]?.paymentType ?? report.rows[0]?.social?.paymentType).toBe(
+      "unknown",
+    );
+    expect(report.recruiterTotals.personalPaidMonthCount).toBe(0);
+    expect(report.recruiterTotals.unknownPaidMonthCount).toBe(1);
+    expect(report.recruiterTotals.actualPaidMonthCount).toBe(1);
+    expect(report.recruiterTotals.salaryEffectiveMonthCount).toBe(0);
+    expect(report.recruiterSummary.fullText).toContain("缴费类型待确认");
+  });
+
+  it("counts overlapping company and personal months once in the actual total", () => {
+    const report = verifyResumeAndSocial({
+      candidateName: "张三",
+      experiences: [experience("甲科技有限公司", "2024-01", "2024-01")],
+      socialRecords: [
+        social("甲科技有限公司", "2024-01", "2024-01", ["2024-01"]),
+        social("社保局个人缴费窗口", "2024-01", "2024-01", ["2024-01"], "personal"),
+      ],
+    });
+    expect(report.recruiterTotals).toMatchObject({
+      companyPaidMonthCount: 1,
+      personalPaidMonthCount: 1,
+      actualPaidMonthCount: 1,
+      overlapMonthCount: 1,
+      salaryEffectiveMonthCount: 1,
+    });
+    expect(report.recruiterSummary.fullText).toContain("重叠月份：1个月");
   });
 });

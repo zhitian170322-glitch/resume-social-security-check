@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { readOverallConclusion } from "@/lib/overall-conclusion";
 
 export const runtime = "nodejs";
 
@@ -13,13 +14,25 @@ export function GET() {
   return NextResponse.json(
     rows.map((row) => {
       const result = row.result_json ? JSON.parse(row.result_json) : null;
+      const conclusion = readOverallConclusion(result, row.status ?? undefined);
       return {
         id: row.id,
         status: row.status,
         stage: row.stage,
         candidateName: row.candidate_name,
-        anomalyCount: result?.summary?.anomalyCount ?? 0,
-        conclusion: result?.summary?.conclusion ?? null,
+        anomalyCount:
+          conclusion.failCount ??
+          result?.recruiterSummary?.failCount ??
+          result?.summary?.anomalyCount ??
+          0,
+        conclusion: conclusion.overallConclusionLabel,
+        overallConclusion: conclusion.overallConclusion,
+        overallConclusionLabel: conclusion.overallConclusionLabel,
+        passCount: conclusion.passCount,
+        failCount: conclusion.failCount,
+        reviewCount: conclusion.reviewCount,
+        actualPaidMonthCount: conclusion.actualPaidMonthCount,
+        salaryEffectiveMonthCount: conclusion.salaryEffectiveMonthCount,
         errorCode: row.error_code,
         createdAt: row.created_at,
         completedAt: row.completed_at,

@@ -189,6 +189,8 @@ export type RecruiterComparisonRow = {
 export type RecruiterTotals = {
   companyPaidMonthCount: number;
   personalPaidMonthCount: number;
+  unknownPaidMonthCount?: number;
+  overlapMonthCount?: number;
   actualPaidMonthCount: number;
   salaryEffectiveMonthCount: number;
   actualPaidDuration: string;
@@ -1552,7 +1554,7 @@ export function buildResultViewModel(input: {
     input.result &&
     typeof input.result === "object" &&
     "schemaVersion" in input.result &&
-    input.result.schemaVersion === 4
+    (input.result.schemaVersion === 4 || input.result.schemaVersion === 5)
   ) {
     return buildSimpleResultViewModel(
       input.result as SimpleVerificationReport,
