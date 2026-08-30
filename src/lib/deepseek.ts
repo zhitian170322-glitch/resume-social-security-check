@@ -144,7 +144,7 @@ export function isPresentMonthRaw(raw: string | null | undefined): boolean {
   return Boolean(raw && PRESENT_PATTERN.test(raw));
 }
 
-function normalizedMonth(raw: string, currentMonth: string) {
+function normalizedMonth(raw: string) {
   if (PRESENT_PATTERN.test(raw)) return null;
   const match = raw
     .trim()
@@ -211,11 +211,11 @@ function exactSourceCandidates(
 
 type LocatedMonthToken = { rawValue: string; normalizedValue: string };
 
-function monthTokens(text: string | null, currentMonth: string) {
+function monthTokens(text: string | null) {
   if (!text) return [];
   const tokens: LocatedMonthToken[] = [];
   for (const match of text.matchAll(RAW_MONTH_PATTERN)) {
-    const normalizedValue = normalizedMonth(match[0], currentMonth);
+    const normalizedValue = normalizedMonth(match[0]);
     if (normalizedValue) {
       tokens.push({ rawValue: match[0], normalizedValue });
     }
@@ -226,14 +226,13 @@ function monthTokens(text: string | null, currentMonth: string) {
 function monthSourceCandidates(
   aiRawValue: string,
   pages: DocumentPage[],
-  currentMonth: string,
 ) {
-  const targetMonth = normalizedMonth(aiRawValue, currentMonth);
+  const targetMonth = normalizedMonth(aiRawValue);
   if (!targetMonth) return exactSourceCandidates(aiRawValue, pages);
   const candidates: ResumeFieldSourceCandidate[] = [];
   for (const page of pages) {
-    const pdfTokens = monthTokens(page.pdfText, currentMonth);
-    const ocrTokens = monthTokens(page.ocrText, currentMonth);
+    const pdfTokens = monthTokens(page.pdfText);
+    const ocrTokens = monthTokens(page.ocrText);
     const addMatching = (
       tokens: LocatedMonthToken[],
       sourceMethod: "pdf_text" | "ocr",
@@ -314,7 +313,6 @@ function buildStringEvidence(
 function buildMonthEvidence(
   aiRawValue: string | null,
   pages: DocumentPage[],
-  currentMonth: string,
 ): EvidenceMonthField {
   const fallback = fallbackEvidenceLocation(pages);
   if (aiRawValue === null) {
@@ -330,8 +328,8 @@ function buildMonthEvidence(
       sourceCandidates: [],
     };
   }
-  const normalizedValue = normalizedMonth(aiRawValue, currentMonth);
-  const candidates = monthSourceCandidates(aiRawValue, pages, currentMonth);
+  const normalizedValue = normalizedMonth(aiRawValue);
+  const candidates = monthSourceCandidates(aiRawValue, pages);
   const first = candidates[0];
   return {
     value: first ? normalizedValue : null,
@@ -361,12 +359,10 @@ export function groundResumeAIResponse(
       resumeStartMonth: buildMonthEvidence(
         experience.startMonthRaw,
         pages,
-        currentMonth,
       ),
       resumeEndMonth: buildMonthEvidence(
         experience.endMonthRaw,
         pages,
-        currentMonth,
       ),
       warnings: [],
     })),
@@ -429,7 +425,7 @@ function inferLegacyCandidates(
         .map((match) => match[0])
         .find(
           (raw) =>
-            normalizedMonth(raw, new Date().toISOString().slice(0, 7)) ===
+            normalizedMonth(raw) ===
             field.value,
         ) ?? rawValue;
   }
@@ -496,7 +492,6 @@ function canonicalStringField(
 function canonicalMonthField(
   field: EvidenceMonthField,
   pages: DocumentPage[],
-  currentMonth: string,
 ): EvidenceMonthField {
   if (field.status === "missing") return field;
   const candidates = (field.sourceCandidates?.length
@@ -506,7 +501,7 @@ function canonicalMonthField(
   const normalized = candidates
     .map((candidate) => ({
       candidate,
-      value: normalizedMonth(candidate.rawValue, currentMonth),
+      value: normalizedMonth(candidate.rawValue),
     }))
     .filter(
       (
@@ -550,8 +545,9 @@ function canonicalMonthField(
 export function selectResumeFieldSources(
   input: ResumeEvidenceExtraction,
   pages: DocumentPage[],
-  currentMonth = new Date().toISOString().slice(0, 7),
+  _currentMonth = new Date().toISOString().slice(0, 7),
 ): ResumeEvidenceExtraction {
+  void _currentMonth;
   const candidateName = canonicalStringField(input.candidateName, pages);
   const experiences = input.experiences.map((experience) => {
     const resumeCompany = canonicalStringField(experience.resumeCompany, pages);
@@ -561,12 +557,10 @@ export function selectResumeFieldSources(
     const resumeStartMonth = canonicalMonthField(
       experience.resumeStartMonth,
       pages,
-      currentMonth,
     );
     const resumeEndMonth = canonicalMonthField(
       experience.resumeEndMonth,
       pages,
-      currentMonth,
     );
     const fields: Array<
       [

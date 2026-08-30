@@ -368,10 +368,11 @@ describe("resume field-level source selection", () => {
     expect(selected.experiences[0].resumeEndMonth.status).toBe("missing");
     expect(selected.experiences[1].resumeEndMonth).toMatchObject({
       rawValue: "Present",
-      normalizedValue: "2026-08",
-      value: "2026-08",
-      status: "verified",
+      normalizedValue: null,
+      value: null,
+      status: "uncertain",
     });
+    expect(selected.experiences[1].resumeCompany.value).toBe("乙公司");
   });
 
   it("does not page-block new field evidence and accepts historical records without position", () => {
