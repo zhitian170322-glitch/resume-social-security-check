@@ -48,8 +48,8 @@ export type SimpleComparisonRow = {
 export type OverallConclusion = "PASS" | "FAIL" | "NEEDS_REVIEW";
 
 export type SimpleVerificationReport = {
-  schemaVersion: 4 | 5;
-  pipeline: "simple-v2" | "simple-v5";
+  schemaVersion: 4 | 5 | 6;
+  pipeline: "simple-v2" | "simple-v5" | "simple-v6";
   candidateName: string;
   verifiedAt: string;
   experiences: ResumeExperience[];
@@ -76,6 +76,14 @@ export type SimpleVerificationReport = {
   monthDetailsText?: string;
   fieldOverrides?: Array<Record<string, unknown>>;
   overrides?: Array<Record<string, unknown>>;
+  sourceConflicts?: Array<{
+    field: "company" | "name" | "position" | "month";
+    nativeValues: string[];
+    ocrValues: string[];
+    pageNumber?: number;
+    sourceFile?: string;
+  }>;
+  hasUnconfirmedFields?: boolean;
   systemExtracted?: {
     candidateName: string;
     experiences: ResumeExperience[];
@@ -672,6 +680,8 @@ export function verifyResumeAndSocial(input: {
   duplicateNotice?: string | null;
   overrides?: Array<Record<string, unknown>>;
   hasManualOverride?: boolean;
+  sourceConflicts?: SimpleVerificationReport["sourceConflicts"];
+  hasUnconfirmedFields?: boolean;
 }): SimpleVerificationReport {
   const appliedOverrides = (input.overrides ?? []).filter(
     (entry) => entry.reviewStatus === "applied",
@@ -706,6 +716,12 @@ export function verifyResumeAndSocial(input: {
   if (nameStatus !== "match" && overallConclusion === "PASS") {
     overallConclusion = "NEEDS_REVIEW";
   }
+  if (
+    overallConclusion === "PASS" &&
+    (input.hasUnconfirmedFields || (input.sourceConflicts?.length ?? 0) > 0)
+  ) {
+    overallConclusion = "NEEDS_REVIEW";
+  }
   const overallConclusionLabel =
     overallConclusion === "PASS"
       ? "通过"
@@ -716,8 +732,8 @@ export function verifyResumeAndSocial(input: {
   recruiterSummary.conclusionLabel = overallConclusionLabel;
   recruiterSummary.headline = `整体结论：${overallConclusionLabel}`;
   return {
-    schemaVersion: 5,
-    pipeline: "simple-v5",
+    schemaVersion: 6,
+    pipeline: "simple-v6",
     candidateName: input.candidateName,
     verifiedAt: input.verifiedAt ?? new Date().toISOString(),
     experiences: input.experiences,
@@ -734,6 +750,8 @@ export function verifyResumeAndSocial(input: {
     duplicateNotice: input.duplicateNotice ?? null,
     fieldOverrides: input.overrides ?? [],
     overrides: input.overrides ?? [],
+    sourceConflicts: input.sourceConflicts ?? [],
+    hasUnconfirmedFields: Boolean(input.hasUnconfirmedFields),
   };
 }
 

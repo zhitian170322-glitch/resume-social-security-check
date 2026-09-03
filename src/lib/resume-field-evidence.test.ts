@@ -321,7 +321,7 @@ describe("resume field-level source selection", () => {
       value: "远景科技有限公司",
       rawValue: "远景科技有限公司",
       sourceMethod: "pdf_text",
-      status: "verified",
+      status: "uncertain",
     });
   });
 

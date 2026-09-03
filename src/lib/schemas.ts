@@ -158,6 +158,40 @@ export const DocumentPageSchema = z
     qualityScore: z.number().min(0).max(100),
     ocrConfidence: z.number().min(0).max(1).nullable(),
     warnings: z.array(z.string()),
+    mergeDecision: z
+      .enum(["agreed", "native", "ocr", "merged", "conflict", "empty"])
+      .optional(),
+    sourceConflicts: z
+      .array(
+        z.object({
+          field: z.enum(["company", "name", "position", "month"]),
+          nativeValues: z.array(z.string()),
+          ocrValues: z.array(z.string()),
+        }),
+      )
+      .optional(),
+    pageEvidence: z
+      .array(
+        z.object({
+          source: z.enum(["native_text", "general_ocr", "table_ocr", "manual"]),
+          pageNumber: z.number().int().positive(),
+          rawText: z.string(),
+          normalizedText: z.string(),
+          requestId: z.string().nullable(),
+          confidence: z.number().nullable(),
+          bbox: z
+            .object({
+              x: z.number(),
+              y: z.number(),
+              width: z.number(),
+              height: z.number(),
+            })
+            .nullable(),
+          sourceFileId: z.string(),
+          pageFingerprint: z.string(),
+        }),
+      )
+      .optional(),
   })
   .strict();
 

@@ -8,7 +8,13 @@ export class UploadError extends Error {
   }
 }
 
-const resumeTypes = new Map([[".pdf", "application/pdf"]]);
+const resumeTypes = new Map([
+  [".pdf", "application/pdf"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".png", "image/png"],
+  [".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+]);
 const socialTypes = new Map([
   [".pdf", "application/pdf"],
   [".jpg", "image/jpeg"],

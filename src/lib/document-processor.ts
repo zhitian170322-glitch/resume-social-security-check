@@ -7,6 +7,11 @@ import { config } from "./config";
 import type { OCRProvider } from "./ocr";
 import { TextQualityEvaluator } from "./text-quality";
 import type { DocumentPage } from "./schemas";
+import { mergeDualTextSources } from "./hybrid-text";
+import { buildPageEvidence } from "./page-evidence";
+import { fileFingerprint, pageFingerprint, shouldSkipDuplicate } from "./material-dedup";
+import { mapLimit, OCR_RENDER_DPI, preprocessPageImage } from "./ocr-runtime";
+import { extractDocxNativeText } from "./docx-text";
 
 const exec = promisify(execFile);
 
@@ -55,9 +60,7 @@ export async function analyzePdf(path: string): Promise<DocumentAnalysis> {
     }
     return {
       pages,
-      estimatedOCRCalls: pages.filter(
-        (page) => page.localText === null || page.ocrRecommended,
-      ).length,
+      estimatedOCRCalls: pages.length,
     };
   } catch (error) {
     throw new Error(`PDF_PARSE_FAILED: ${error instanceof Error ? error.message : "PDF 解析失败"}`);
@@ -82,92 +85,250 @@ function extractionConflict(pdfText: string, ocrText: string) {
   return 1 - shared / Math.max(pdf.size, ocr.size) > config.EXTRACTION_CONFLICT_THRESHOLD;
 }
 
+function buildResumePage(input: {
+  page: number;
+  sourceFile: string;
+  pdfText: string | null;
+  ocrText: string | null;
+  pdfQualityScore: number;
+  ocrQualityScore: number | null;
+  ocrConfidence: number | null;
+  ocrRequestId: string | null;
+  extraWarnings?: string[];
+}): DocumentPage {
+  const merged = mergeDualTextSources({
+    nativeText: input.pdfText,
+    ocrText: input.ocrText,
+  });
+  let extractionMethod: DocumentPage["extractionMethod"] = "hybrid";
+  if (merged.decision === "native" || merged.decision === "agreed") {
+    extractionMethod = input.ocrText ? "hybrid" : "pdf_text";
+  }
+  if (merged.decision === "native" && !input.ocrText) extractionMethod = "pdf_text";
+  if (merged.decision === "ocr") extractionMethod = "ocr";
+  if (merged.decision === "conflict" || merged.decision === "empty") {
+    extractionMethod = "manual_required";
+  }
+  const warnings = [...(input.extraWarnings ?? [])];
+  if (merged.decision === "conflict") warnings.push("SOURCE_CONFLICT");
+  if (
+    input.pdfText &&
+    input.ocrText &&
+    extractionConflict(input.pdfText, input.ocrText)
+  ) {
+    warnings.push("EXTRACTION_CONFLICT");
+  }
+  if (
+    input.ocrText &&
+    input.ocrConfidence !== null &&
+    input.ocrConfidence < config.OCR_MIN_CONFIDENCE
+  ) {
+    warnings.push("OCR_CONFIDENCE_LOW");
+  }
+  return {
+    page: input.page,
+    sourceFile: input.sourceFile,
+    pdfText: input.pdfText,
+    ocrText: input.ocrText,
+    selectedText: merged.selectedText,
+    extractionMethod,
+    qualityScore: Math.max(input.pdfQualityScore, input.ocrQualityScore ?? 0),
+    ocrConfidence: input.ocrConfidence,
+    warnings: [...new Set(warnings)],
+    mergeDecision: merged.decision,
+    sourceConflicts: merged.conflicts,
+    pageEvidence: [
+      buildPageEvidence({
+        source: "native_text",
+        pageNumber: input.page,
+        rawText: input.pdfText,
+        sourceFileId: input.sourceFile,
+      }),
+      buildPageEvidence({
+        source: "general_ocr",
+        pageNumber: input.page,
+        rawText: input.ocrText,
+        requestId: input.ocrRequestId,
+        confidence: input.ocrConfidence,
+        sourceFileId: input.sourceFile,
+      }),
+    ],
+  };
+}
+
 export async function extractResumeDocumentPages(input: {
   path: string;
   sourceFile: string;
   ocr: OCRProvider | null;
   analysis?: DocumentAnalysis;
+  seenFingerprints?: Set<string>;
+  onDuplicatePage?: (page: number) => void;
   onOCRCall?: (page: number, result: Awaited<ReturnType<OCRProvider["recognize"]>>) => void;
 }): Promise<DocumentPage[]> {
   const analysis = input.analysis ?? (await analyzePdf(input.path));
   const evaluator = new TextQualityEvaluator({
     ocrScoreThreshold: config.TEXT_QUALITY_MIN_SCORE,
   });
-  const pages: DocumentPage[] = [];
-  for (const page of analysis.pages) {
+  const seen = input.seenFingerprints ?? new Set<string>();
+  const plans = analysis.pages.map((page) => {
     const pdfText = page.localText;
     const pdfQuality = evaluator.evaluate(pdfText ?? "");
-    const complexLayout = pdfQuality.warnings.some((warning) =>
-      [
-        "suspicious_two_column_order",
-        "possible_table_structure_loss",
-      ].includes(
-        warning,
-      ),
-    );
-    const shouldOCR =
-      !pdfText ||
-      pdfQuality.ocrRecommended ||
-      (config.RESUME_DUAL_CHANNEL_ON_WARNING && complexLayout);
-    let ocrText: string | null = null;
-    let ocrConfidence: number | null = null;
-    let ocrQualityScore: number | null = null;
-    const warnings: string[] = [...pdfQuality.warnings];
-    if (shouldOCR) {
-      if (!input.ocr) throw new Error("阿里云 OCR 凭证未配置");
-      const image = await renderPdfPage(input.path, page.page);
-      const result = await input.ocr.recognize(image, "image/png");
-      input.onOCRCall?.(page.page, result);
-      ocrText = result.text;
-      ocrConfidence = result.confidence;
-      ocrQualityScore = evaluator.evaluate(result.text).score;
+    const usefulNative = (pdfText ?? "").replace(/\s+/gu, "").length >= 20;
+    const nativeFp = pageFingerprint(pdfText ?? "");
+    const duplicateNative = usefulNative && seen.has(nativeFp);
+    if (usefulNative) seen.add(nativeFp);
+    return { page, pdfText, pdfQuality, duplicateNative };
+  });
+  const ocrByPage = new Map<
+    number,
+    {
+      text: string | null;
+      confidence: number | null;
+      requestId: string | null;
+      qualityScore: number | null;
+      failed: boolean;
+      skipped: boolean;
     }
-    let selectedText = pdfText;
-    let extractionMethod: DocumentPage["extractionMethod"] = "pdf_text";
-    if (!pdfText && ocrText) {
-      selectedText = ocrText;
-      extractionMethod = "ocr";
-    } else if (pdfText && ocrText) {
-      if (extractionConflict(pdfText, ocrText)) {
-        selectedText = null;
-        extractionMethod = "manual_required";
-        warnings.push("EXTRACTION_CONFLICT");
-      } else {
-        selectedText =
-          complexLayout || pdfQuality.score < config.TEXT_QUALITY_MIN_SCORE
-            ? ocrText
-            : pdfText;
-        extractionMethod = "hybrid";
+  >();
+  const ocrTargets = plans.filter((plan) => !plan.duplicateNative && input.ocr);
+  await mapLimit(ocrTargets, config.OCR_MAX_CONCURRENCY, async (plan) => {
+    try {
+      const rendered = await renderPdfPage(
+        input.path,
+        plan.page.page,
+        config.OCR_RENDER_DPI || OCR_RENDER_DPI,
+      );
+      const image = await preprocessPageImage(rendered);
+      if (shouldSkipDuplicate(seen, fileFingerprint(image))) {
+        ocrByPage.set(plan.page.page, {
+          text: null,
+          confidence: null,
+          requestId: null,
+          qualityScore: null,
+          failed: false,
+          skipped: true,
+        });
+        input.onDuplicatePage?.(plan.page.page);
+        return;
       }
+      const result = await input.ocr!.recognize(image, "image/png");
+      input.onOCRCall?.(plan.page.page, result);
+      ocrByPage.set(plan.page.page, {
+        text: result.text || null,
+        confidence: result.confidence,
+        requestId: result.requestId ?? null,
+        qualityScore: evaluator.evaluate(result.text).score,
+        failed: false,
+        skipped: false,
+      });
+    } catch {
+      ocrByPage.set(plan.page.page, {
+        text: null,
+        confidence: null,
+        requestId: null,
+        qualityScore: null,
+        failed: true,
+        skipped: false,
+      });
     }
-    if (
-      shouldOCR &&
-      (ocrConfidence === null ||
-        ocrConfidence < config.OCR_MIN_CONFIDENCE ||
-        (ocrQualityScore !== null && ocrQualityScore < config.TEXT_QUALITY_MIN_SCORE))
-    ) {
-      selectedText = null;
-      extractionMethod = "manual_required";
-      warnings.push("OCR_CONFIDENCE_LOW");
+  });
+  const pages: DocumentPage[] = [];
+  for (const plan of plans) {
+    if (plan.duplicateNative) {
+      input.onDuplicatePage?.(plan.page.page);
+      continue;
     }
-    pages.push({
-      page: page.page,
-      sourceFile: input.sourceFile,
-      pdfText,
-      ocrText,
-      selectedText,
-      extractionMethod,
-      qualityScore:
-        extractionMethod === "ocr" ||
-        (extractionMethod === "hybrid" &&
-          (complexLayout || pdfQuality.score < config.TEXT_QUALITY_MIN_SCORE))
-          ? (ocrQualityScore ?? 0)
-          : pdfQuality.score,
-      ocrConfidence,
-      warnings: [...new Set(warnings)],
-    });
+    const ocr = ocrByPage.get(plan.page.page);
+    if (ocr?.skipped) continue;
+    if (!input.ocr && !plan.pdfText) {
+      throw new Error("阿里云 OCR 凭证未配置");
+    }
+    pages.push(
+      buildResumePage({
+        page: plan.page.page,
+        sourceFile: input.sourceFile,
+        pdfText: plan.pdfText,
+        ocrText: ocr?.text ?? null,
+        pdfQualityScore: plan.pdfQuality.score,
+        ocrQualityScore: ocr?.qualityScore ?? null,
+        ocrConfidence: ocr?.confidence ?? null,
+        ocrRequestId: ocr?.requestId ?? null,
+        extraWarnings: [
+          ...plan.pdfQuality.warnings,
+          ...(ocr?.failed ? ["OCR_PAGE_FAILED"] : []),
+        ],
+      }),
+    );
   }
   return pages;
+}
+
+export async function extractResumeImagePage(input: {
+  data: Buffer;
+  sourceFile: string;
+  ocr: OCRProvider | null;
+  seenFingerprints?: Set<string>;
+  onDuplicatePage?: (page: number) => void;
+  onOCRCall?: (page: number, result: Awaited<ReturnType<OCRProvider["recognize"]>>) => void;
+}): Promise<DocumentPage[]> {
+  const imageFp = fileFingerprint(input.data);
+  if (input.seenFingerprints && shouldSkipDuplicate(input.seenFingerprints, imageFp)) {
+    input.onDuplicatePage?.(1);
+    return [];
+  }
+  input.seenFingerprints?.add(imageFp);
+  if (!input.ocr) throw new Error("阿里云 OCR 凭证未配置");
+  const warnings: string[] = [];
+  let ocrText: string | null = null;
+  let ocrConfidence: number | null = null;
+  let ocrRequestId: string | null = null;
+  let ocrQualityScore: number | null = null;
+  try {
+    const image = await preprocessPageImage(input.data);
+    const result = await input.ocr.recognize(image, "image/png");
+    input.onOCRCall?.(1, result);
+    ocrText = result.text || null;
+    ocrConfidence = result.confidence;
+    ocrRequestId = result.requestId ?? null;
+    ocrQualityScore = new TextQualityEvaluator({
+      ocrScoreThreshold: config.TEXT_QUALITY_MIN_SCORE,
+    }).evaluate(result.text).score;
+  } catch {
+    warnings.push("OCR_PAGE_FAILED");
+  }
+  return [
+    buildResumePage({
+      page: 1,
+      sourceFile: input.sourceFile,
+      pdfText: null,
+      ocrText,
+      pdfQualityScore: 0,
+      ocrQualityScore,
+      ocrConfidence,
+      ocrRequestId,
+      extraWarnings: warnings,
+    }),
+  ];
+}
+
+export async function extractResumeDocxPages(input: {
+  path: string;
+  sourceFile: string;
+}): Promise<DocumentPage[]> {
+  const native = await extractDocxNativeText(input.path);
+  return [
+    buildResumePage({
+      page: 1,
+      sourceFile: input.sourceFile,
+      pdfText: native || null,
+      ocrText: null,
+      pdfQualityScore: native ? 90 : 0,
+      ocrQualityScore: null,
+      ocrConfidence: null,
+      ocrRequestId: null,
+      extraWarnings: native ? [] : ["NATIVE_TEXT_EMPTY"],
+    }),
+  ];
 }
 
 export async function processPdf(
@@ -204,7 +365,7 @@ export async function processPdf(
 export async function renderPdfPage(
   path: string,
   page: number,
-  dpi = 200,
+  dpi = OCR_RENDER_DPI,
 ): Promise<Buffer> {
   const prefix = join(config.PROCESSING_DIR, `${randomUUID()}-page`);
   try {

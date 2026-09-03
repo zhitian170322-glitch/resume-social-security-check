@@ -31,7 +31,7 @@ export function readOverallConclusion(result: unknown, taskStatus?: string): His
     return empty(taskStatus === "COMPLETED" ? "LEGACY" : "NEEDS_REVIEW");
   }
   const record = result as Record<string, unknown>;
-  if (record.schemaVersion === 5 || record.schemaVersion === 4) {
+  if (record.schemaVersion === 6 || record.schemaVersion === 5 || record.schemaVersion === 4) {
     const summary = (record.recruiterSummary ?? {}) as Record<string, unknown>;
     const totals = (record.recruiterTotals ?? {}) as Record<string, unknown>;
     const conclusion =

@@ -247,6 +247,7 @@ export type ResultViewModel =
       duplicateNotice?: string | null;
       overallConclusion?: SimpleVerificationReport["overallConclusion"];
       overallConclusionLabel?: string;
+      sourceConflicts?: SimpleVerificationReport["sourceConflicts"];
     }
   | {
       schemaVersion: 1;
@@ -1555,6 +1556,7 @@ function buildSimpleResultViewModel(
     duplicateNotice: report.duplicateNotice,
     overallConclusion: report.overallConclusion,
     overallConclusionLabel: report.overallConclusionLabel,
+    sourceConflicts: report.sourceConflicts,
   };
 }
 
@@ -1571,7 +1573,9 @@ export function buildResultViewModel(input: {
     input.result &&
     typeof input.result === "object" &&
     "schemaVersion" in input.result &&
-    (input.result.schemaVersion === 4 || input.result.schemaVersion === 5)
+    (input.result.schemaVersion === 4 ||
+      input.result.schemaVersion === 5 ||
+      input.result.schemaVersion === 6)
   ) {
     return buildSimpleResultViewModel(
       input.result as SimpleVerificationReport,

@@ -6,6 +6,7 @@ import OcrClient, {
 import { Config as OpenApiConfig } from "@alicloud/openapi-client";
 import { RuntimeOptions } from "@alicloud/tea-util";
 import { config } from "./config";
+import { withOcrRetry } from "./ocr-runtime";
 import { db } from "./db";
 import { contentHash } from "./stage-cache";
 import {
@@ -112,7 +113,7 @@ async function recognizeSafely(
   run: () => Promise<SocialSecurityOCRResult>,
 ): Promise<SocialSecurityOCRResult | null> {
   try {
-    return await run();
+    return await withOcrRetry(run);
   } catch {
     return null;
   }

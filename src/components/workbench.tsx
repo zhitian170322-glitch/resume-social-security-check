@@ -127,12 +127,12 @@ export function Workbench() {
             <span className="file-symbol">PDF</span>
             <span className="upload-copy">
               <strong>简历</strong>
-              <small>{resume ? resume.name : "选择一份 PDF，最大 20MB"}</small>
+              <small>{resume ? resume.name : "PDF / 图片 / DOCX，最大 20MB"}</small>
             </span>
             <span className="upload-action">{resume ? "已读取" : "选择文件"}</span>
             <input
               type="file"
-              accept=".pdf,application/pdf"
+              accept=".pdf,.jpg,.jpeg,.png,.docx,application/pdf,image/jpeg,image/png,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               onChange={(event) => setResume(event.target.files?.[0] ?? null)}
             />
           </label>

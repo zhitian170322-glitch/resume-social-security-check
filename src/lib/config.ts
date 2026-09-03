@@ -26,6 +26,8 @@ const envSchema = z.object({
   RESUME_DUAL_CHANNEL_ON_WARNING: z.enum(["true", "false"]).default("true"),
   ALIYUN_TABLE_OCR_LINELESS: z.enum(["true", "false"]).default("true"),
   SOCIAL_SECURITY_OCR_VERSION: z.string().min(1).default("social-security-ocr-v1"),
+  OCR_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(2).default(2),
+  OCR_RENDER_DPI: z.coerce.number().int().min(72).max(400).default(300),
   OCR_GENERAL_ESTIMATED_COST: z.coerce.number().nonnegative().default(0.0825),
   OCR_TABLE_ESTIMATED_COST: z.coerce.number().nonnegative().default(0.0825),
   DEEPSEEK_ESTIMATED_COST_PER_CALL: z.coerce.number().nonnegative().default(0.01),

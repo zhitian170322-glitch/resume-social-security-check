@@ -453,6 +453,10 @@ function inferLegacyCandidates(
   return candidates;
 }
 
+function normalizeFieldCompare(value: string) {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
 function canonicalStringField(
   field: EvidenceStringField,
   pages: DocumentPage[],
@@ -465,6 +469,20 @@ function canonicalStringField(
   const reliable = candidates.filter((candidate) =>
     candidateIsReliable(pages, candidate),
   );
+  const pdfValues = new Set(
+    reliable
+      .filter((candidate) => candidate.sourceMethod === "pdf_text")
+      .map((candidate) => normalizeFieldCompare(candidate.rawValue)),
+  );
+  const ocrValues = new Set(
+    reliable
+      .filter((candidate) => candidate.sourceMethod === "ocr")
+      .map((candidate) => normalizeFieldCompare(candidate.rawValue)),
+  );
+  const sourceConflict =
+    pdfValues.size > 0 &&
+    ocrValues.size > 0 &&
+    [...pdfValues].every((value) => !ocrValues.has(value));
   const selected =
     reliable.find((candidate) => candidate.sourceMethod === "pdf_text") ??
     reliable.find((candidate) => candidate.sourceMethod === "ocr") ??
@@ -478,7 +496,7 @@ function canonicalStringField(
     value: selected.rawValue,
     rawValue: selected.rawValue,
     normalizedValue: selected.rawValue,
-    status: reliable.includes(selected) ? "verified" : "uncertain",
+    status: sourceConflict || !reliable.includes(selected) ? "uncertain" : "verified",
     sourceFile: selected.sourceFile,
     sourcePage: selected.sourcePage,
     sourceQuote: selected.sourceQuote,
@@ -522,7 +540,22 @@ function canonicalMonthField(
   if (!selected) {
     return { ...field, value: null, status: "uncertain", sourceCandidates: candidates };
   }
-  const conflictingValues = new Set(reliable.map(({ value }) => value)).size > 1;
+  const reliablePdf = new Set(
+    reliable
+      .filter(({ candidate }) => candidate.sourceMethod === "pdf_text")
+      .map(({ value }) => value),
+  );
+  const reliableOcr = new Set(
+    reliable
+      .filter(({ candidate }) => candidate.sourceMethod === "ocr")
+      .map(({ value }) => value),
+  );
+  const sourceConflict =
+    reliablePdf.size > 0 &&
+    reliableOcr.size > 0 &&
+    [...reliablePdf].every((value) => !reliableOcr.has(value));
+  const conflictingValues =
+    sourceConflict || new Set(reliable.map(({ value }) => value)).size > 1;
   return {
     ...field,
     value: selected.value,
@@ -588,21 +621,29 @@ export function selectResumeFieldSources(
   return ResumeEvidenceExtractionSchema.parse({ candidateName, experiences });
 }
 
+export function formatLabeledResumeSource(pages: DocumentPage[]): string {
+  return pages
+    .flatMap((page) => {
+      const blocks: string[] = [];
+      if (page.pdfText?.trim()) {
+        blocks.push(`[page=${page.page} source=native_text]\n${page.pdfText}`);
+      }
+      if (page.ocrText?.trim()) {
+        blocks.push(`[page=${page.page} source=general_ocr]\n${page.ocrText}`);
+      }
+      return blocks;
+    })
+    .join("\n\n");
+}
+
 export async function extractResumeWithEvidence(
   pages: DocumentPage[],
   onCall?: (metric: DeepSeekCallMetric) => void,
 ): Promise<ResumeEvidenceExtraction> {
-  const source = pages.map((page) => ({
-    sourceFile: page.sourceFile,
-    sourcePage: page.page,
-    pdfTextCandidate: page.pdfText,
-    pdfTextQualityScore: page.qualityScore,
-    ocrTextCandidate: page.ocrText,
-    ocrConfidence: page.ocrConfidence,
-  }));
   const extracted = await parseWithRetry(
     ResumeAIResponseSchema,
-    `你只负责从简历原文识别基础字段并把字段归组到工作经历，不能创造、推断、纠错或改写事实。
+    `你只负责从已标注页码和来源的简历原文识别基础字段并把字段归组到工作经历，不能创造、推断、纠错或改写事实。
+文本带有 [page=N source=native_text|general_ocr] 标签。
 只输出以下简单 JSON：
 {
   "candidateName": "姓名或null",
@@ -616,10 +657,12 @@ export async function extractResumeWithEvidence(
 规则：
 1. companyRaw、position 和年月字段必须原样复制，禁止补全、纠错、简称、品牌替换或标准化。
 2. 原文没有字段时输出 null；禁止根据职责猜职位，禁止根据工龄或相邻经历补日期。
-3. 同一经历可以跨页组合，但不得输出工作描述、项目、技能、教育、联系方式或其他字段。
-4. 不要输出 Evidence、sourceFile、sourcePage、sourceQuote、sourceMethod、confidence 或 sourceCandidates；这些由程序确定性构建。
-5. 不计算任职月数，不判断公司关系，不判断核验结论。`,
-    JSON.stringify(source),
+3. 某个字段无法确认时只将该字段标为 null，不要删除整段工作经历。
+4. 不要自行融合互相冲突的公司名、姓名、职位或月份；冲突字段输出 null。
+5. 不得把不同页、不同经历中的文字拼成一个公司名。
+6. 不要输出 Evidence、sourceFile、sourcePage、sourceQuote、sourceMethod、confidence 或 sourceCandidates；这些由程序确定性构建。
+7. 不计算任职月数，不判断公司关系，不判断核验结论，不判断缴费类型，不映射单位编号。`,
+    formatLabeledResumeSource(pages),
     onCall,
   );
   return groundResumeAIResponse(extracted, pages);

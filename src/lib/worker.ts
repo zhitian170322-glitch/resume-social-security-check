@@ -4,7 +4,9 @@ import { config } from "./config";
 import { fileStorage } from "./file-storage";
 import {
   type DocumentAnalysis,
+  extractResumeDocxPages,
   extractResumeDocumentPages,
+  extractResumeImagePage,
   renderPdfPage,
   withTemporaryDocument,
 } from "./document-processor";
@@ -35,8 +37,10 @@ import { SocialSecurityPageClassifier } from "./social-security-page-classifier"
 import { persistSocialSecurityOCRResult } from "./social-security-evidence";
 import { extractSocialRecords } from "./social-records";
 import { extractResumeWithEvidence, isPresentMonthRaw } from "./deepseek";
-import { pageFingerprint, shouldSkipDuplicate } from "./material-dedup";
+import { detectFieldConflicts } from "./hybrid-text";
+import { fileFingerprint, pageFingerprint, shouldSkipDuplicate } from "./material-dedup";
 import { buildPaidMonthDetails, monthDetailsText } from "./month-details";
+import { buildPageEvidence } from "./page-evidence";
 import {
   type SocialRecord,
   verifyResumeAndSocial,
@@ -225,7 +229,12 @@ async function socialSecurityPageOCR(
   input: Buffer,
   mimeType: string,
   page: number,
-): Promise<SocialSecurityOCRResult> {
+): Promise<{
+  selected: SocialSecurityOCRResult;
+  attempts: SocialSecurityOCRResult[];
+  tableUsed: boolean;
+  generalUsed: boolean;
+}> {
   let prepared = input;
   if (input.length > 9 * 1024 * 1024) {
     prepared = await sharp(input)
@@ -247,7 +256,12 @@ async function socialSecurityPageOCR(
   for (const result of outcome.attempts) {
     persistSocialSecurityOCRResult({ taskId: task.id, documentId, result });
   }
-  return outcome.selected;
+  return {
+    selected: outcome.selected,
+    attempts: outcome.attempts,
+    tableUsed: outcome.tableUsed,
+    generalUsed: outcome.generalUsed,
+  };
 }
 
 function socialSecurityOCRProvider(
@@ -347,6 +361,63 @@ async function estimateOCRCalls(
   return count;
 }
 
+function socialPageEvidence(
+  outcome: {
+    selected: SocialSecurityOCRResult;
+    attempts: SocialSecurityOCRResult[];
+    tableUsed: boolean;
+    generalUsed: boolean;
+  },
+  pageNumber: number,
+  sourceFile: string,
+  pdfText: string | null,
+): Pick<DocumentPage, "pageEvidence" | "sourceConflicts" | "warnings" | "mergeDecision"> {
+  const table = outcome.attempts.find((item) => item.apiType === "TABLE");
+  const general = outcome.attempts.find((item) => item.apiType === "GENERAL");
+  const conflicts =
+    table && general
+      ? detectFieldConflicts(table.rawText, general.rawText)
+      : [];
+  const warnings: string[] = [];
+  if (!outcome.tableUsed && !outcome.generalUsed) warnings.push("OCR_BOTH_SOURCES_EMPTY");
+  else if (!outcome.tableUsed) warnings.push("OCR_TABLE_FAILED");
+  else if (!outcome.generalUsed) warnings.push("OCR_GENERAL_FAILED");
+  if (conflicts.length) warnings.push("SOURCE_CONFLICT");
+  return {
+    mergeDecision: conflicts.length
+      ? "conflict"
+      : outcome.tableUsed && outcome.generalUsed
+        ? "merged"
+        : outcome.tableUsed || outcome.generalUsed
+          ? "ocr"
+          : "empty",
+    sourceConflicts: conflicts,
+    warnings,
+    pageEvidence: [
+      buildPageEvidence({
+        source: "native_text",
+        pageNumber,
+        rawText: pdfText,
+        sourceFileId: sourceFile,
+      }),
+      buildPageEvidence({
+        source: "table_ocr",
+        pageNumber,
+        rawText: table?.rawText ?? null,
+        requestId: table?.requestId ?? null,
+        sourceFileId: sourceFile,
+      }),
+      buildPageEvidence({
+        source: "general_ocr",
+        pageNumber,
+        rawText: general?.rawText ?? outcome.selected.rawText,
+        requestId: general?.requestId ?? outcome.selected.requestId,
+        sourceFileId: sourceFile,
+      }),
+    ],
+  };
+}
+
 function tableRowsText(result: SocialSecurityOCRResult) {
   return result.tables
     .flatMap((table) => {
@@ -377,6 +448,7 @@ async function extractOCRStage(
     `${PIPELINE_VERSION}:file-ocr:${resumeFile.kind}:${contentHash(resumeData)}`,
   );
   const cachedResumePages = readExtractionCache<DocumentPage[]>(resumeFileCacheKey);
+  let duplicateFound = false;
   if (cachedResumePages) {
     pages.push(
       ...cachedResumePages.map((page) => ({
@@ -385,25 +457,62 @@ async function extractOCRStage(
       })),
     );
   } else {
-    await withTemporaryDocument(resumeData, ".pdf", async (path) => {
+    const resumeSeen = new Set<string>();
+    const onResumeDuplicate = () => {
+      duplicateFound = true;
+    };
+    const onResumeOcr = (page: number, result: OCRResult) => {
+      logSafeEvent("info", {
+        taskId: task.id,
+        stage: "OCR_COMPLETE",
+        provider: "aliyun-general",
+        page,
+        requestId: result.requestId,
+      });
+    };
+    if (resumeFile.mime_type === "application/pdf") {
+      await withTemporaryDocument(resumeData, ".pdf", async (path) => {
+        pages.push(
+          ...(await extractResumeDocumentPages({
+            path,
+            sourceFile: resumeFile.original_name,
+            ocr: generalOCR(task),
+            analysis: pdfAnalyses.get(resumeFile.id),
+            seenFingerprints: resumeSeen,
+            onDuplicatePage: onResumeDuplicate,
+            onOCRCall: onResumeOcr,
+          })),
+        );
+      });
+    } else if (
+      resumeFile.mime_type === "image/jpeg" ||
+      resumeFile.mime_type === "image/png"
+    ) {
       pages.push(
-        ...(await extractResumeDocumentPages({
-        path,
-        sourceFile: resumeFile.original_name,
-        ocr: generalOCR(task),
-        analysis: pdfAnalyses.get(resumeFile.id),
-        onOCRCall(page, result) {
-          logSafeEvent("info", {
-            taskId: task.id,
-            stage: "OCR_COMPLETE",
-            provider: "aliyun-general",
-            page,
-            requestId: result.requestId,
-          });
-        },
+        ...(await extractResumeImagePage({
+          data: resumeData,
+          sourceFile: resumeFile.original_name,
+          ocr: generalOCR(task),
+          seenFingerprints: resumeSeen,
+          onDuplicatePage: onResumeDuplicate,
+          onOCRCall: onResumeOcr,
         })),
       );
-    });
+    } else if (
+      resumeFile.mime_type ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ) {
+      await withTemporaryDocument(resumeData, ".docx", async (path) => {
+        pages.push(
+          ...(await extractResumeDocxPages({
+            path,
+            sourceFile: resumeFile.original_name,
+          })),
+        );
+      });
+    } else {
+      throw new Error("INVALID_FILE_TYPE");
+    }
     writeExtractionCache(
       resumeFileCacheKey,
       "hybrid",
@@ -413,7 +522,7 @@ async function extractOCRStage(
   }
   const seenFileHashes = new Set<string>();
   const seenPageFingerprints = new Set<string>();
-  let duplicateFound = false;
+  const seenImageHashes = new Set<string>();
   for (const file of socialFiles) {
     const data = await fileStorage.read(file.storage_key);
     if (shouldSkipDuplicate(seenFileHashes, contentHash(data))) {
@@ -461,13 +570,18 @@ async function extractOCRStage(
             source: "PDF_TEXT",
           });
           const image = await renderPdfPage(path, page.page);
-          const result = await socialSecurityPageOCR(
+          if (shouldSkipDuplicate(seenImageHashes, fileFingerprint(image))) {
+            duplicateFound = true;
+            continue;
+          }
+          const outcome = await socialSecurityPageOCR(
             task,
             file.document_id,
             image,
             "image/png",
             page.page,
           );
+          const result = outcome.selected;
           const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
           const fingerprint = pageFingerprint(selectedText);
           if (selectedText.replace(/\s+/g, "").length >= 20 && shouldSkipDuplicate(seenPageFingerprints, fingerprint)) {
@@ -480,6 +594,12 @@ async function extractOCRStage(
           const confidence = confidences.length
             ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length
             : null;
+          const extra = socialPageEvidence(
+            outcome,
+            page.page,
+            file.original_name,
+            page.localText,
+          );
           const documentPage: DocumentPage = {
             page: page.page,
             sourceFile: file.original_name,
@@ -489,10 +609,12 @@ async function extractOCRStage(
             extractionMethod:
               result.provider === "local-pdftotext"
                 ? "pdf_text"
-                : confidence !== null &&
-                    confidence >= config.OCR_MIN_CONFIDENCE
-                  ? "ocr"
-                  : "manual_required",
+                : extra.mergeDecision === "conflict" || extra.mergeDecision === "empty"
+                  ? "manual_required"
+                  : confidence !== null &&
+                      confidence >= config.OCR_MIN_CONFIDENCE
+                    ? "ocr"
+                    : "manual_required",
             qualityScore:
               result.provider === "local-pdftotext"
                 ? page.qualityScore
@@ -504,11 +626,15 @@ async function extractOCRStage(
               ...classification.reasons.map(
                 (reason) => `CLASSIFIER_HINT:${reason}`,
               ),
+              ...extra.warnings,
               ...(confidence !== null &&
               confidence >= config.OCR_MIN_CONFIDENCE
                 ? []
                 : ["OCR_CONFIDENCE_LOW"]),
             ],
+            mergeDecision: extra.mergeDecision,
+            sourceConflicts: extra.sourceConflicts,
+            pageEvidence: extra.pageEvidence,
           };
           pages.push(documentPage);
           fileDocumentPages.push(documentPage);
@@ -517,13 +643,18 @@ async function extractOCRStage(
         }
       });
     } else {
-      const result = await socialSecurityPageOCR(
+      if (shouldSkipDuplicate(seenImageHashes, fileFingerprint(data))) {
+        duplicateFound = true;
+        continue;
+      }
+      const outcome = await socialSecurityPageOCR(
         task,
         file.document_id,
         data,
         file.mime_type,
         1,
       );
+      const result = outcome.selected;
       const selectedText = `${result.rawText}\n${tableRowsText(result)}`;
       const fingerprint = pageFingerprint(selectedText);
       if (
@@ -539,6 +670,7 @@ async function extractOCRStage(
       const confidence = confidences.length
         ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length
         : null;
+      const extra = socialPageEvidence(outcome, 1, file.original_name, null);
       const documentPage: DocumentPage = {
         page: 1,
         sourceFile: file.original_name,
@@ -546,15 +678,22 @@ async function extractOCRStage(
         ocrText: selectedText,
         selectedText,
         extractionMethod:
-          confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
-            ? "ocr"
-            : "manual_required",
+          extra.mergeDecision === "conflict" || extra.mergeDecision === "empty"
+            ? "manual_required"
+            : confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
+              ? "ocr"
+              : "manual_required",
         qualityScore: confidence === null ? 0 : Math.round(confidence * 100),
         ocrConfidence: confidence,
-        warnings:
-          confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
+        warnings: [
+          ...extra.warnings,
+          ...(confidence !== null && confidence >= config.OCR_MIN_CONFIDENCE
             ? []
-            : ["OCR_CONFIDENCE_LOW"],
+            : ["OCR_CONFIDENCE_LOW"]),
+        ],
+        mergeDecision: extra.mergeDecision,
+        sourceConflicts: extra.sourceConflicts,
+        pageEvidence: extra.pageEvidence,
       };
       pages.push(documentPage);
       fileDocumentPages.push(documentPage);
@@ -832,6 +971,31 @@ async function processTask(task: TaskRow) {
     socialName: socialNameMatch?.[1] ?? null,
     duplicateNotice: ocrPayload.duplicateNotice ?? null,
   };
+  const resumePages = ocrPayload.pages.filter(
+    (page) => page.sourceFile === ocrPayload.resumeSourceFile,
+  );
+  const sourceConflicts = ocrPayload.pages.flatMap((page) =>
+    (page.sourceConflicts ?? []).map((conflict) => ({
+      ...conflict,
+      pageNumber: page.page,
+      sourceFile: page.sourceFile,
+    })),
+  );
+  const hasUnconfirmedFields =
+    structured.resume.candidateName.status !== "verified" ||
+    structured.resume.experiences.some(
+      (experience) =>
+        experience.resumeCompany.status === "uncertain" ||
+        experience.resumeStartMonth.status === "uncertain" ||
+        experience.resumeEndMonth.status === "uncertain",
+    ) ||
+    ocrPayload.pages.some(
+      (page) =>
+        page.mergeDecision === "conflict" ||
+        page.mergeDecision === "empty" ||
+        page.warnings.includes("OCR_BOTH_SOURCES_EMPTY") ||
+        page.warnings.includes("SOURCE_CONFLICT"),
+    );
   const report = {
     ...verifyResumeAndSocial({
       candidateName: extracted.candidateName,
@@ -839,6 +1003,8 @@ async function processTask(task: TaskRow) {
       experiences,
       socialRecords,
       duplicateNotice: extracted.duplicateNotice,
+      sourceConflicts,
+      hasUnconfirmedFields,
     }),
     monthDetails: details,
     monthDetailsText: monthDetailsText(details),

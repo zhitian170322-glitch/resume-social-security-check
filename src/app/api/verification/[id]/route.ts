@@ -108,21 +108,27 @@ export async function GET(
   const resultObject =
     result && typeof result === "object" ? (result as { schemaVersion?: number }) : null;
   const verification =
-    resultObject?.schemaVersion === 4 || resultObject?.schemaVersion === 5
+    resultObject?.schemaVersion === 4 ||
+    resultObject?.schemaVersion === 5 ||
+    resultObject?.schemaVersion === 6
       ? null
       : latestArtifactPayload<Phase8VerificationResult>(
           task.id,
           "VERIFICATION_COMPLETE",
         );
   const derivedFacts =
-    resultObject?.schemaVersion === 4 || resultObject?.schemaVersion === 5
+    resultObject?.schemaVersion === 4 ||
+    resultObject?.schemaVersion === 5 ||
+    resultObject?.schemaVersion === 6
       ? null
       : latestArtifactPayload<DerivedFactsPayload>(
           task.id,
           "DERIVED_FACTS",
         );
   const validationStage =
-    resultObject?.schemaVersion === 4 || resultObject?.schemaVersion === 5
+    resultObject?.schemaVersion === 4 ||
+    resultObject?.schemaVersion === 5 ||
+    resultObject?.schemaVersion === 6
       ? null
       : latestArtifactPayload<EvidenceValidationStagePayload>(
           task.id,
@@ -231,7 +237,10 @@ export async function PATCH(
       return NextResponse.json({ message: "任务完成后才能人工修正" }, { status: 409 });
     }
     const result = parseJson(task.result_json) as SimpleVerificationReport | null;
-    if (!result?.systemExtracted || result.schemaVersion !== 5) {
+    if (
+      !result?.systemExtracted ||
+      (result.schemaVersion !== 5 && result.schemaVersion !== 6)
+    ) {
       return NextResponse.json(
         { message: "当前结果无法安全持久化人工修正，未改写数据库结构" },
         { status: 409 },
@@ -263,6 +272,8 @@ export async function PATCH(
       socialRecords: applied.socialRecords,
       duplicateNotice: result.systemExtracted.duplicateNotice,
       overrides: nextOverrides,
+      sourceConflicts: result.sourceConflicts,
+      hasUnconfirmedFields: result.hasUnconfirmedFields,
     });
     const monthDetails = buildPaidMonthDetails(
       applied.socialRecords,
@@ -272,6 +283,8 @@ export async function PATCH(
     );
     const saved = {
       ...next,
+      schemaVersion: result.schemaVersion === 5 ? 5 : next.schemaVersion,
+      pipeline: result.schemaVersion === 5 ? "simple-v5" : next.pipeline,
       monthDetails,
       monthDetailsText: monthDetailsText(monthDetails),
       fieldOverrides: nextOverrides,

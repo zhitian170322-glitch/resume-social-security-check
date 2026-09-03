@@ -5,6 +5,8 @@ import { Config as OpenApiConfig } from "@alicloud/openapi-client";
 import { RuntimeOptions } from "@alicloud/tea-util";
 import { config } from "./config";
 import { db } from "./db";
+import { adaptAliyunOcrResponse } from "./ocr-adapter";
+import { withOcrRetry } from "./ocr-runtime";
 
 export type OCRResult = {
   text: string;
@@ -32,6 +34,14 @@ export class OCRLimitError extends Error {
   }
 }
 
+function safeParse(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return {};
+  }
+}
+
 export class AliyunOCRProvider implements OCRProvider {
   private readonly client: OcrClient;
 
@@ -50,18 +60,23 @@ export class AliyunOCRProvider implements OCRProvider {
 
   async recognize(input: Buffer): Promise<OCRResult> {
     const request = new RecognizeGeneralRequest({ body: Readable.from(input) });
-    const response = await this.client.recognizeGeneralWithOptions(
-      request,
-      new RuntimeOptions({ readTimeout: 60_000, connectTimeout: 10_000 }),
+    const response = await withOcrRetry(() =>
+      this.client.recognizeGeneralWithOptions(
+        request,
+        new RuntimeOptions({ readTimeout: 60_000, connectTimeout: 10_000 }),
+      ),
     );
-    const raw = response.body?.data ? JSON.parse(response.body.data) : {};
-    const text = extractAliyunText(raw);
-    if (!text) throw new Error(response.body?.message || "OCR 未返回文字");
+    const adapted = adaptAliyunOcrResponse(response, 1);
+    const raw = response.body ?? {};
     return {
-      text,
+      text: adapted.rawText,
       raw,
-      confidence: extractAliyunConfidence(raw),
-      requestId: response.body?.requestId,
+      confidence: extractAliyunConfidence(
+        typeof response.body?.data === "string"
+          ? safeParse(response.body.data)
+          : response.body?.data ?? raw,
+      ),
+      requestId: adapted.requestId ?? response.body?.requestId,
     };
   }
 }
@@ -81,21 +96,6 @@ function extractAliyunConfidence(value: unknown): number | null {
   return probabilities.reduce((sum, probability) => sum + probability, 0) /
     probabilities.length /
     100;
-}
-
-function extractAliyunText(value: unknown): string {
-  if (!value || typeof value !== "object") return "";
-  const record = value as Record<string, unknown>;
-  if (typeof record.content === "string") return record.content;
-  if (Array.isArray(record.prism_wordsInfo)) {
-    return record.prism_wordsInfo
-      .map((line) =>
-        line && typeof line === "object" && "word" in line ? String(line.word) : "",
-      )
-      .filter(Boolean)
-      .join("\n");
-  }
-  return "";
 }
 
 export function currentMonthOCRUsage() {
