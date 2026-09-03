@@ -979,9 +979,6 @@ async function processTask(task: TaskRow) {
     socialName: socialNameMatch?.[1] ?? null,
     duplicateNotice: ocrPayload.duplicateNotice ?? null,
   };
-  const resumePages = ocrPayload.pages.filter(
-    (page) => page.sourceFile === ocrPayload.resumeSourceFile,
-  );
   const sourceConflicts = ocrPayload.pages.flatMap((page) =>
     (page.sourceConflicts ?? []).map((conflict) => ({
       ...conflict,
