@@ -954,6 +954,14 @@ async function processTask(task: TaskRow) {
     endIsPresent: isPresentMonthRaw(
       experience.resumeEndMonth.rawValue ?? experience.resumeEndMonth.sourceQuote,
     ),
+    sourcePage: experience.resumeCompany.sourcePage,
+    sourceQuote: experience.resumeCompany.sourceQuote,
+    sourceKind:
+      experience.resumeCompany.sourceMethod === "pdf_text"
+        ? ("native_text" as const)
+        : experience.resumeCompany.sourceMethod === "ocr"
+          ? ("general_ocr" as const)
+          : ("hybrid" as const),
   }));
   const socialRecords = structured.socialRecords.map((record, index) => ({
     ...record,

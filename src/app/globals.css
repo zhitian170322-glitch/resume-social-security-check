@@ -762,6 +762,26 @@ h2 { font-size: 19px; letter-spacing: -.25px; }
 .social-card { background: #ffe8c7; border: 1px solid #b7791f; color: #6a3d00; }
 .result-card { background: #f7f7f8; border: 1px solid #c7c7cc; color: #1d1d1f; }
 .source-card h3 { margin: 0 0 8px; font-size: 14px; }
+.source-conflict-banner, .source-conflict-flag {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid #b42318;
+  border-radius: 8px;
+  background: #fee4e2;
+  color: #7a271a;
+  font-size: 13px;
+  font-weight: 750;
+}
+.field-evidence { margin-top: 6px; font-size: 12px; font-weight: 500; color: inherit; }
+.field-evidence summary { cursor: pointer; text-decoration: underline; }
+.field-evidence.conflict summary { color: #b42318; font-weight: 750; }
+.evidence-quote {
+  margin: 4px 0 0;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .override-panel, .month-detail-panel {
   margin-top: 18px; padding: 18px; border: 1px solid var(--border); border-radius: 16px; background: #fff;
 }

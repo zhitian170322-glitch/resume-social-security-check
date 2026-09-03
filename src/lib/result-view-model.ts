@@ -19,7 +19,10 @@ import type {
   Phase8VerificationResult,
   VerificationV2Item,
 } from "./verification-engine-phase8";
-import type { SimpleVerificationReport } from "./simple-verification";
+import type {
+  FieldEvidenceView,
+  SimpleVerificationReport,
+} from "./simple-verification";
 
 export type HumanReviewStatus = "PENDING" | "CONFIRMED" | "REJECTED";
 export type DisplayEvidenceStatus =
@@ -187,6 +190,8 @@ export type RecruiterComparisonRow = {
   hasManualOverride?: boolean;
   verificationBaseline?: string | null;
   endIsPresent?: boolean;
+  hasSourceConflict?: boolean;
+  fieldEvidence?: Record<string, FieldEvidenceView>;
 };
 
 export type RecruiterTotals = {

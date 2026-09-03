@@ -48,6 +48,42 @@ function Highlight({
   );
 }
 
+function FieldEvidence({
+  evidence,
+}: {
+  evidence?: {
+    label: string;
+    sourceLabel: string;
+    pageNumber: number | null;
+    quote: string;
+    conflict: boolean;
+    alternatives?: Array<{
+      sourceLabel: string;
+      pageNumber: number | null;
+      quote: string;
+    }>;
+  };
+}) {
+  if (!evidence) return null;
+  return (
+    <details className={`field-evidence ${evidence.conflict ? "conflict" : ""}`}>
+      <summary>识别依据</summary>
+      {evidence.conflict && <p className="source-conflict-flag">来源冲突，待确认</p>}
+      <p>
+        来源：{evidence.sourceLabel}
+        {evidence.pageNumber ? ` · 第 ${evidence.pageNumber} 页` : ""}
+      </p>
+      <p className="evidence-quote">{evidence.quote}</p>
+      {evidence.alternatives?.map((item) => (
+        <p className="evidence-quote" key={`${item.sourceLabel}-${item.quote}`}>
+          {item.sourceLabel}
+          {item.pageNumber ? ` 第${item.pageNumber}页` : ""}：{item.quote}
+        </p>
+      ))}
+    </details>
+  );
+}
+
 function currentValue(row: RecruiterComparisonRow, field: OverrideField) {
   if (field === "resumeCompany") return row.resumeCompany === "—" ? "" : row.resumeCompany;
   if (field === "socialCompany" || field === "unitCompany") {
@@ -234,6 +270,9 @@ export function EvidenceResultView({
           {model.nameStatus === "unknown" && <p>姓名字段待确认</p>}
           {model.duplicateNotice && <p>{model.duplicateNotice}</p>}
           {totals.overlapMonthCount ? <p>重叠月份：{totals.overlapMonthCount}个月</p> : null}
+          {(model.sourceConflicts?.length ?? 0) > 0 && (
+            <p className="source-conflict-banner">来源冲突，待确认</p>
+          )}
         </div>
         <div className="trust-row">
           <button className="soft-button" onClick={() => copy(summary.fullText)}>
@@ -346,11 +385,26 @@ export function EvidenceResultView({
                   key={row.id}
                   onClick={() => setSelectedId(row.id)}
                 >
-                  <td className="cell-resume company-name">{row.resumeCompany}</td>
-                  <td className="cell-resume">{row.position}</td>
-                  <td className="cell-resume nowrap">{row.resumePeriod}</td>
-                  <td className="cell-social company-name">{row.socialCompany}</td>
-                  <td className="cell-social nowrap">{row.socialPeriod}</td>
+                  <td className="cell-resume company-name">
+                    {row.resumeCompany}
+                    <FieldEvidence evidence={row.fieldEvidence?.resumeCompany} />
+                  </td>
+                  <td className="cell-resume">
+                    {row.position}
+                    <FieldEvidence evidence={row.fieldEvidence?.position} />
+                  </td>
+                  <td className="cell-resume">
+                    <span className="nowrap">{row.resumePeriod}</span>
+                    <FieldEvidence evidence={row.fieldEvidence?.startMonth} />
+                  </td>
+                  <td className="cell-social company-name">
+                    {row.socialCompany}
+                    <FieldEvidence evidence={row.fieldEvidence?.socialCompany} />
+                  </td>
+                  <td className="cell-social">
+                    <span className="nowrap">{row.socialPeriod}</span>
+                    <FieldEvidence evidence={row.fieldEvidence?.endMonth} />
+                  </td>
                   <td className="cell-social nowrap">{row.paidMonthLabel}</td>
                   <td>
                     <Highlight kind={companyHighlight(row.companyConsistentLabel)}>
@@ -406,12 +460,17 @@ export function EvidenceResultView({
             <section className="source-card resume-card">
               <h3>简历申报</h3>
               <p className="company-name">{row.resumeCompany}</p>
+              <FieldEvidence evidence={row.fieldEvidence?.resumeCompany} />
               <p>{row.position}</p>
               <p className="nowrap">{row.resumePeriod}</p>
+              {(row.hasSourceConflict || row.fieldEvidence?.resumeCompany?.conflict) && (
+                <p className="source-conflict-banner">来源冲突，待确认</p>
+              )}
             </section>
             <section className="source-card social-card">
               <h3>社保事实依据</h3>
               <p className="company-name">{row.socialCompany}</p>
+              <FieldEvidence evidence={row.fieldEvidence?.socialCompany} />
               <p className="nowrap">{row.socialPeriod}</p>
               <p className="nowrap">{row.paidMonthLabel}</p>
               {row.verificationBaseline && (

@@ -1,11 +1,26 @@
 import { monthIndex } from "./schemas";
 import { inclusiveMonthRange } from "./social-security-evidence";
+import { isUnitCode } from "./company-cleanup";
+import { sourceLabel } from "./page-evidence";
 import type {
   RecruiterComparisonRow,
   RecruiterRowStatus,
   RecruiterSummary,
   RecruiterTotals,
 } from "./result-view-model";
+
+export type FieldEvidenceView = {
+  label: string;
+  sourceLabel: string;
+  pageNumber: number | null;
+  quote: string;
+  conflict: boolean;
+  alternatives?: Array<{
+    sourceLabel: string;
+    pageNumber: number | null;
+    quote: string;
+  }>;
+};
 
 export type ResumeExperience = {
   sourceId?: string;
@@ -15,6 +30,9 @@ export type ResumeExperience = {
   endMonth: string | null;
   endMonthRaw?: string | null;
   endIsPresent?: boolean;
+  sourcePage?: number | null;
+  sourceQuote?: string | null;
+  sourceKind?: "native_text" | "general_ocr" | "manual" | "hybrid";
 };
 
 export type SocialRecord = {
@@ -136,6 +154,7 @@ export function inferPaymentType(
     return explicit;
   }
   if (PERSONAL_PATTERN.test(companyRaw ?? "")) return "personal";
+  if (isUnitCode(companyRaw)) return "unknown";
   return companyRaw?.trim() ? "company" : "unknown";
 }
 
@@ -419,10 +438,126 @@ const statusLabels: Record<RecruiterRowStatus, string> = {
   SOCIAL_ONLY: "简历未体现",
 };
 
+function snippet(value: string | null | undefined) {
+  const text = (value ?? "").replace(/\s+/gu, " ").trim();
+  if (!text) return "待人工确认";
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+}
+
+function buildFieldEvidence(
+  row: SimpleComparisonRow,
+  sourceConflicts: SimpleVerificationReport["sourceConflicts"] | undefined,
+  overrides: Array<Record<string, unknown>> | undefined,
+): Record<string, FieldEvidenceView> {
+  const related = (sourceConflicts ?? []).filter((conflict) => {
+    const values = [...conflict.nativeValues, ...conflict.ocrValues];
+    return (
+      (row.resume?.companyRaw && values.includes(row.resume.companyRaw)) ||
+      (row.social?.companyRaw && values.includes(row.social.companyRaw)) ||
+      (row.resume?.startMonth && values.some((value) => value.includes(row.resume!.startMonth!))) ||
+      (row.resume?.endMonth && values.some((value) => value.includes(row.resume!.endMonth!)))
+    );
+  });
+  const overrideFor = (field: string) =>
+    (overrides ?? []).find(
+      (entry) =>
+        entry.reviewStatus === "applied" &&
+        entry.field === field &&
+        (entry.targetId === row.resume?.sourceId ||
+          entry.targetId === row.social?.sourceId ||
+          entry.rowIndex === undefined),
+    );
+  const resumeSource = row.hasManualOverride && overrideFor("resumeCompany")
+    ? "manual"
+    : row.resume?.sourceKind ?? "hybrid";
+  const companyConflict = related.some((item) => item.field === "company");
+  const monthConflict = related.some((item) => item.field === "month");
+  const nameConflict = related.some((item) => item.field === "name");
+  const positionConflict = related.some((item) => item.field === "position");
+  const companyConflictItem = related.find((item) => item.field === "company");
+  const monthConflictItem = related.find((item) => item.field === "month");
+  return {
+    resumeCompany: {
+      label: "简历公司",
+      sourceLabel: sourceLabel(resumeSource),
+      pageNumber: row.resume?.sourcePage ?? null,
+      quote: snippet(row.resume?.sourceQuote ?? row.resume?.companyRaw),
+      conflict: companyConflict,
+      alternatives: companyConflictItem
+        ? [
+            {
+              sourceLabel: "原生文字",
+              pageNumber: companyConflictItem.pageNumber ?? row.resume?.sourcePage ?? null,
+              quote: snippet(companyConflictItem.nativeValues.join("；")),
+            },
+            {
+              sourceLabel: "General OCR",
+              pageNumber: companyConflictItem.pageNumber ?? null,
+              quote: snippet(companyConflictItem.ocrValues.join("；")),
+            },
+          ]
+        : undefined,
+    },
+    socialCompany: {
+      label: "社保公司",
+      sourceLabel: row.social?.sourcePage ? "Table OCR / General OCR" : "待确认",
+      pageNumber: row.social?.sourcePage ?? null,
+      quote: snippet(row.social?.sourceQuote ?? row.social?.companyRaw),
+      conflict: companyConflict,
+    },
+    position: {
+      label: "职位",
+      sourceLabel: sourceLabel(resumeSource),
+      pageNumber: row.resume?.sourcePage ?? null,
+      quote: snippet(row.resume?.position),
+      conflict: positionConflict,
+    },
+    startMonth: {
+      label: "开始月份",
+      sourceLabel: sourceLabel(resumeSource),
+      pageNumber: row.resume?.sourcePage ?? null,
+      quote: snippet(row.resume?.startMonth),
+      conflict: monthConflict,
+      alternatives: monthConflictItem
+        ? [
+            {
+              sourceLabel: "原生文字",
+              pageNumber: monthConflictItem.pageNumber ?? null,
+              quote: snippet(monthConflictItem.nativeValues.join("；")),
+            },
+            {
+              sourceLabel: "General OCR",
+              pageNumber: monthConflictItem.pageNumber ?? null,
+              quote: snippet(monthConflictItem.ocrValues.join("；")),
+            },
+          ]
+        : undefined,
+    },
+    endMonth: {
+      label: "结束月份",
+      sourceLabel: sourceLabel(resumeSource),
+      pageNumber: row.resume?.sourcePage ?? null,
+      quote: snippet(row.resume?.endMonth),
+      conflict: monthConflict,
+    },
+    candidateName: {
+      label: "姓名",
+      sourceLabel: sourceLabel(resumeSource),
+      pageNumber: row.resume?.sourcePage ?? null,
+      quote: snippet(row.resume?.sourceQuote),
+      conflict: nameConflict,
+    },
+  };
+}
+
 export function buildRecruiterRowFromSimple(
   row: SimpleComparisonRow,
   index: number,
   candidateName: string,
+  extras?: {
+    sourceConflicts?: SimpleVerificationReport["sourceConflicts"];
+    overrides?: Array<Record<string, unknown>>;
+  },
 ): RecruiterComparisonRow {
   const resumeCompany = display(row.resume?.companyRaw);
   const socialCompany = display(row.social?.companyRaw);
@@ -515,6 +650,10 @@ export function buildRecruiterRowFromSimple(
     hasManualOverride: Boolean(row.hasManualOverride),
     verificationBaseline: row.verificationBaseline ?? null,
     endIsPresent: Boolean(row.resume?.endIsPresent),
+    hasSourceConflict: Boolean(
+      extras?.sourceConflicts?.some((item) => item.field === "company" || item.field === "month" || item.field === "name"),
+    ) || Boolean(row.reason.includes("来源冲突")),
+    fieldEvidence: buildFieldEvidence(row, extras?.sourceConflicts, extras?.overrides),
   };
 }
 
@@ -700,7 +839,10 @@ export function verifyResumeAndSocial(input: {
       }),
     }));
   const recruiterTable = rows.map((row, index) =>
-    buildRecruiterRowFromSimple(row, index, input.candidateName),
+    buildRecruiterRowFromSimple(row, index, input.candidateName, {
+      sourceConflicts: input.sourceConflicts,
+      overrides: input.overrides,
+    }),
   );
   const recruiterTotals = buildSimpleTotals(rows);
   const recruiterSummary = buildSummary(
