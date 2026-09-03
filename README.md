@@ -10,7 +10,7 @@
 
 DeepSeek 只返回候选人姓名和经历原文字段，不判断通过、不配对社保、不修改公司原文、不计算月份差或缴费年限。
 
-新任务使用 `schemaVersion: 5`。旧 schema 2、4 只读展示，不自动改写或重算；无法解释时显示“旧版记录”。不得把 `task completed` 显示为完全一致。
+新任务使用 `schemaVersion: 6`。简历每页同时保留原生文字和 General OCR，社保继续 Table OCR + General OCR。来源合并由 TypeScript 确定性规则完成，不用 AI 选边。旧 schema 2、4、5 只读展示，不自动改写或重算；无法解释时显示“旧版记录”。不得把 `task completed` 显示为完全一致。
 
 ## 本地运行
 
@@ -34,7 +34,7 @@ npm run test
 npm run build
 ```
 
-脱敏真实结构测试位于 `tests/v5-anonymized-structure.test.ts`，不调用真实 DeepSeek 或阿里云 API。
+脱敏真实结构测试位于 `tests/v5-anonymized-structure.test.ts` 和 `tests/v6-hybrid-ocr.test.ts`，不调用真实 DeepSeek 或阿里云 API。生产真实材料验收见 `docs/v6-local-manual-qa.md`，真实材料不得进入仓库。
 
 ## Docker 与现有 Caddy 部署
 
@@ -54,7 +54,7 @@ Compose 只将应用绑定到宿主机 `127.0.0.1` 对应端口，不启动新�
 ./scripts/deploy-update.sh 更新包.tar.gz 更新包.tar.gz.sha256
 ```
 
-`deploy-update.sh` 默认 dry-run，不连接生产服务器。它会校验明确路径、SHA256、磁盘和内存、更新包内容，并检查 Compose/Dockerfile 约束。`--apply` 本仓库默认拒绝，除非目标环境另行授权。
+`deploy-update.sh` 默认 dry-run，不连接生产服务器。它会校验明确路径、SHA256、磁盘和内存、更新包内容，并检查 Compose/Dockerfile 约束。远程 `--apply` 为 `MANUAL_ONLY`，本仓库不声称支持正式远程部署。服务器本机部署必须同时传入 `--apply-local --confirm=APPLY-LOCAL`。构建使用不可变标签 `resume-social-security-check:v6-<shortSha>`，必须 `docker image inspect` 确认镜像存在后才能提升 `latest`。systemd `Result=success` 不能代替镜像存在。
 
 更新包不得包含 `.env`、密钥、SQLite、uploads、真实 PDF/图片、真实 OCR 原文、`node_modules`、构建缓存或 Git 脏文件。
 
