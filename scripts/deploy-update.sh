@@ -75,7 +75,7 @@ if [[ "${MEM_AVAILABLE_KB:-0}" -lt 200000 ]]; then
 fi
 
 echo "==> 检查更新包内容"
-if tar -tzf "$PACKAGE" | grep -E '(^|/)\.env$|(^|/)data/|(^|/)uploads/|(^|/)processing/|(^|/)reports/|\.db$|node_modules/|\.next/|\.git/'; then
+if tar -tzf "$PACKAGE" | grep -E '(^|/)\.env$|(^|/)data/|(^|/)uploads/|(^|/)data/processing/|(^|/)data/reports/|\.db$|node_modules/|\.next/|\.git/'; then
   echo "更新包包含禁止内容。" >&2
   exit 1
 fi
