@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "简历与社保严格核验",
-  description: "以社保缴纳记录为事实依据，逐段对照简历工作经历并计算定薪有效社保年限",
+  description: "以社保缴纳记录为事实依据，逐段对照简历公司名称与起止月份",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

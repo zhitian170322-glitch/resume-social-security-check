@@ -84,7 +84,7 @@ export function ResultView({ taskId }: { taskId: string }) {
             <h1>{viewModel.candidateName}</h1>
           </div>
           <nav>
-            <button className="soft-button" onClick={() => copy(text)}>复制全部</button>
+            <button className="soft-button" onClick={() => copy(text)}>一键复制核验结果</button>
             <Link className="soft-button" href="/history">历史记录</Link>
             <Link className="soft-button" href="/">新建核验</Link>
           </nav>

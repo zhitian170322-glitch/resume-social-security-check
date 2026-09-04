@@ -10,6 +10,7 @@ type Status = {
   estimatedOCRCalls: number;
   errorCode: string | null;
   errorMessage: string | null;
+  cancelState?: string;
 };
 
 export function ProcessingView({ taskId }: { taskId: string }) {
@@ -20,7 +21,10 @@ export function ProcessingView({ taskId }: { taskId: string }) {
     estimatedOCRCalls: 0,
     errorCode: null,
     errorMessage: null,
+    cancelState: "none",
   });
+  const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -62,31 +66,67 @@ export function ProcessingView({ taskId }: { taskId: string }) {
     window.location.reload();
   }
 
+  async function cancelRecognition() {
+    setCancelling(true);
+    await fetch(`/api/verification/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cancel: true }),
+    });
+    setConfirming(false);
+    const response = await fetch(`/api/verification/${taskId}`, { cache: "no-store" });
+    setTask(await response.json());
+    setCancelling(false);
+  }
+
+  const cancelled = task.cancelState === "cancelled" || task.errorCode === "CANCELLED";
+  const inFlight = !cancelled && task.status !== "COMPLETED" && task.status !== "FAILED";
   const current = PROCESSING_STAGES.findIndex(([key]) => key === task.stage);
+
   return (
     <main className="shell narrow">
-      <section className="process-card">
-        <p className="eyebrow">核验任务</p>
-        <h1>正在处理材料</h1>
-        <p className="subtitle">系统仅显示真实处理阶段，完成后将自动进入结果页。</p>
-        <div className="stage-list">
-          {PROCESSING_STAGES.map(([key, label], index) => {
-            const done = current > index || task.status === "COMPLETED";
-            const active = current === index;
-            return (
-              <div className={done ? "done" : active ? "active" : ""} key={key}>
-                <i>{done ? "✓" : active ? "●" : "○"}</i>
-                <span>{done ? `已完成：${label}` : active ? `正在：${label}` : `等待：${label}`}</span>
-              </div>
-            );
-          })}
-        </div>
-        {task.status === "FAILED" && (
+      <section className="process-card compact">
+        <header className="process-head">
+          <div>
+            <p className="eyebrow">核验任务</p>
+            <h1>{cancelled ? "识别已终止" : "正在处理材料"}</h1>
+          </div>
+          {inFlight && (
+            <button className="danger-button" type="button" onClick={() => setConfirming(true)}>
+              终止识别
+            </button>
+          )}
+        </header>
+        {cancelled ? (
+          <div className="error-panel">
+            <strong>识别已终止</strong>
+            <p>已保留原始上传材料和已保存证据，未生成核验结论。</p>
+            <button type="button" onClick={() => router.push("/#new-verification")}>重新创建任务</button>
+            <button type="button" onClick={() => router.push("/")}>返回工作台</button>
+          </div>
+        ) : (
+          <>
+            <p className="subtitle">系统仅显示真实处理阶段，完成后将自动进入结果页。</p>
+            <div className="stage-list">
+              {PROCESSING_STAGES.map(([key, label], index) => {
+                const done = current > index || task.status === "COMPLETED";
+                const active = current === index;
+                return (
+                  <div className={done ? "done" : active ? "active" : ""} key={key}>
+                    <i>{done ? "✓" : active ? "●" : "○"}</i>
+                    <span>{done ? `已完成：${label}` : active ? `正在：${label}` : `等待：${label}`}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+        {task.status === "FAILED" && !cancelled && (
           <div className="error-panel">
             <strong>{userFacingError(task.errorCode, task.errorMessage)}</strong>
             {task.errorCode && <p>错误代码：{task.errorCode}</p>}
-            <button onClick={retryFailedStage}>从失败阶段重试</button>
-            <button onClick={() => router.push("/")}>返回工作台</button>
+            <button type="button" onClick={retryFailedStage}>从失败阶段重试</button>
+            <button type="button" onClick={() => router.push("/")}>返回工作台</button>
           </div>
         )}
       </section>
@@ -97,9 +137,23 @@ export function ProcessingView({ taskId }: { taskId: string }) {
             <p>本次任务预计需要 {task.estimatedOCRCalls} 次 OCR 调用。</p>
             <p>继续核验可能产生阿里云 OCR 费用。本次确认仅对当前任务有效。</p>
             <div className="modal-actions">
-              <button onClick={() => router.push("/")}>取消</button>
-              <button className="danger-button" onClick={continuePaid}>
+              <button type="button" onClick={() => router.push("/")}>取消</button>
+              <button className="danger-button" type="button" onClick={continuePaid}>
                 继续并使用付费 OCR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirming && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>确认终止识别？</h2>
+            <p>当前页请求会安全结束，但不会继续下一阶段，也不会生成核验结论。</p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setConfirming(false)}>取消</button>
+              <button className="danger-button" type="button" disabled={cancelling} onClick={cancelRecognition}>
+                {cancelling ? "正在终止…" : "确认终止"}
               </button>
             </div>
           </div>

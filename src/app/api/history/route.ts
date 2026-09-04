@@ -22,7 +22,7 @@ export function GET(request: Request) {
   };
   const rows = db
     .prepare(
-      `SELECT id, status, stage, candidate_name, result_json, error_code, created_at,
+      `SELECT id, status, stage, candidate_name, result_json, error_code, cancel_state, created_at,
               completed_at, updated_at, review_status
        FROM verification_tasks ORDER BY created_at DESC LIMIT 200`,
     )
@@ -30,7 +30,10 @@ export function GET(request: Request) {
   const items = rows
     .map((row) => {
       const result = row.result_json ? JSON.parse(row.result_json) : null;
-      const conclusion = readOverallConclusion(result, row.status ?? undefined);
+      const conclusion = readOverallConclusion(result, row.status ?? undefined, {
+        cancelState: row.cancel_state,
+        errorCode: row.error_code,
+      });
       const companies = companiesFromResult(result);
       const searchRecord = historyRecordFromTask({
         id: String(row.id),
@@ -41,6 +44,8 @@ export function GET(request: Request) {
         created_at: String(row.created_at),
         updated_at: row.updated_at,
         completed_at: row.completed_at,
+        cancel_state: row.cancel_state,
+        error_code: row.error_code,
       });
       return {
         id: row.id,

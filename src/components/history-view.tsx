@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { displayStatusLabel, recordHref, statusToneClass } from "@/lib/status-tone";
 
 type Item = {
   id: string;
@@ -13,19 +14,20 @@ type Item = {
   passCount: number | null;
   failCount: number | null;
   reviewCount: number | null;
-  actualPaidMonthCount: number | null;
-  salaryEffectiveMonthCount: number | null;
   createdAt: string;
   updatedAt: string | null;
   reviewStatus: string | null;
 };
 
-function conclusionClass(label: string) {
-  if (label === "通过") return "tone-pass";
-  if (label === "不通过") return "tone-fail";
-  if (label === "待人工确认") return "tone-review";
-  return "tone-legacy";
-}
+const STATUS_OPTIONS = [
+  { value: "", label: "全部" },
+  { value: "处理中", label: "处理中" },
+  { value: "通过", label: "通过" },
+  { value: "不通过", label: "不通过" },
+  { value: "待人工确认", label: "待人工确认" },
+  { value: "已终止", label: "已终止" },
+  { value: "处理失败", label: "处理失败" },
+];
 
 export function HistoryView() {
   const router = useRouter();
@@ -36,20 +38,24 @@ export function HistoryView() {
     candidateName: searchParams.get("candidateName") ?? "",
     resumeCompany: searchParams.get("resumeCompany") ?? "",
     socialCompany: searchParams.get("socialCompany") ?? "",
-    status: searchParams.get("status") ?? "",
+    status: searchParams.get("status") ?? (searchParams.get("review") === "1" ? "待人工确认" : ""),
     from: searchParams.get("from") ?? "",
     to: searchParams.get("to") ?? "",
   });
-  const reviewOnly = searchParams.get("review") === "1";
+
+  useEffect(() => {
+    if (searchParams.get("review") === "1" && !searchParams.get("status")) {
+      router.replace("/history?status=待人工确认");
+    }
+  }, [router, searchParams]);
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(form)) {
       if (value) params.set(key, value);
     }
-    if (reviewOnly) params.set("review", "1");
     return params.toString();
-  }, [form, reviewOnly]);
+  }, [form]);
 
   useEffect(() => {
     fetch(`/api/history?${queryString}`)
@@ -63,7 +69,6 @@ export function HistoryView() {
     for (const [key, value] of Object.entries(form)) {
       if (value) params.set(key, value);
     }
-    if (reviewOnly) params.set("review", "1");
     router.replace(`/history?${params.toString()}`);
   }
 
@@ -79,8 +84,8 @@ export function HistoryView() {
     <main className="shell history-page">
       <div className="result-header">
         <div>
-          <p className="eyebrow">{reviewOnly ? "复核队列" : "核验档案"}</p>
-          <h1>{reviewOnly ? "待人工复核" : "历史记录"}</h1>
+          <p className="eyebrow">核验档案</p>
+          <h1>核查记录</h1>
         </div>
         <nav>
           <Link className="soft-button" href="/">返回工作台</Link>
@@ -115,28 +120,18 @@ export function HistoryView() {
             value={form.status}
             onChange={(event) => setForm({ ...form, status: event.target.value })}
           >
-            <option value="">全部</option>
-            <option value="通过">通过</option>
-            <option value="不通过">不通过</option>
-            <option value="待人工确认">待人工确认</option>
-            <option value="旧版记录">旧版记录</option>
+            {STATUS_OPTIONS.map((option) => (
+              <option key={option.label} value={option.value}>{option.label}</option>
+            ))}
           </select>
         </label>
         <label>
           开始日期
-          <input
-            type="date"
-            value={form.from}
-            onChange={(event) => setForm({ ...form, from: event.target.value })}
-          />
+          <input type="date" value={form.from} onChange={(event) => setForm({ ...form, from: event.target.value })} />
         </label>
         <label>
           结束日期
-          <input
-            type="date"
-            value={form.to}
-            onChange={(event) => setForm({ ...form, to: event.target.value })}
-          />
+          <input type="date" value={form.to} onChange={(event) => setForm({ ...form, to: event.target.value })} />
         </label>
         <button className="soft-button" type="submit">搜索</button>
       </form>
@@ -145,7 +140,7 @@ export function HistoryView() {
         <div className="empty">暂无核验记录</div>
       ) : (
         <div className="history-table-wrap">
-          <table className="history-table">
+          <table className="history-table history-access-table">
             <thead>
               <tr>
                 <th>候选人</th>
@@ -153,52 +148,45 @@ export function HistoryView() {
                 <th>一致数量</th>
                 <th>不通过数量</th>
                 <th>待确认数量</th>
-                <th>实际缴费月数</th>
-                <th>定薪有效月数</th>
                 <th>更新时间</th>
-                <th>操作</th>
+                <th>查看结果</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => (
-                <tr key={item.id}>
-                  <td className="history-name">{item.candidateName || "姓名待人工确认"}</td>
-                  <td>
-                    <span className={`tone-chip ${conclusionClass(item.overallConclusionLabel)}`}>
-                      {item.status === "FAILED"
-                        ? "处理失败"
-                        : item.status !== "COMPLETED"
-                          ? "处理中"
-                          : item.overallConclusionLabel}
-                    </span>
-                  </td>
-                  <td>{item.passCount ?? "—"}</td>
-                  <td>{item.failCount ?? "—"}</td>
-                  <td>{item.reviewCount ?? "—"}</td>
-                  <td className="nowrap">{item.actualPaidMonthCount ?? "—"}</td>
-                  <td className="nowrap">{item.salaryEffectiveMonthCount ?? "—"}</td>
-                  <td className="history-time nowrap">
-                    {new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN")}
-                  </td>
-                  <td>
-                    <div className="table-actions">
-                      <Link
-                        className="soft-button"
-                        href={
-                          item.status === "COMPLETED"
-                            ? `/result/${item.id}${reviewOnly ? "?focus=review" : ""}`
-                            : `/processing/${item.id}`
-                        }
+              {items.map((item) => {
+                const href = recordHref(item);
+                const label = displayStatusLabel(item);
+                return (
+                  <tr className="history-access" key={item.id}>
+                    <td className="history-name">
+                      <Link className="row-link" href={href}>{item.candidateName || "姓名待人工确认"}</Link>
+                    </td>
+                    <td>
+                      <span className={`tone-chip ${statusToneClass(label)}`}>{label}</span>
+                    </td>
+                    <td>{item.status === "COMPLETED" ? item.passCount ?? "—" : "—"}</td>
+                    <td>{item.status === "COMPLETED" ? item.failCount ?? "—" : "—"}</td>
+                    <td>{item.status === "COMPLETED" ? item.reviewCount ?? "—" : "—"}</td>
+                    <td className="history-time nowrap">
+                      {new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN")}
+                    </td>
+                    <td className="nowrap">
+                      <Link className="row-cta" href={href}>查看结果 →</Link>
+                      <button
+                        className="danger-text"
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setPendingDelete(item.id);
+                        }}
                       >
-                        查看
-                      </Link>
-                      <button className="danger-text" onClick={() => setPendingDelete(item.id)}>
                         删除
                       </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -210,8 +198,8 @@ export function HistoryView() {
             <h2>确认删除</h2>
             <p>删除记录及仍保留的原始文件？此操作不可撤销。</p>
             <div className="modal-actions">
-              <button onClick={() => setPendingDelete(null)}>取消</button>
-              <button className="danger-button" onClick={() => remove(pendingDelete)}>
+              <button type="button" onClick={() => setPendingDelete(null)}>取消</button>
+              <button className="danger-button" type="button" onClick={() => remove(pendingDelete)}>
                 确认删除
               </button>
             </div>

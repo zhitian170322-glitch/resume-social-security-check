@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { displayStatusLabel, recordHref, statusToneClass } from "@/lib/status-tone";
 
 type HistoryItem = {
   id: string;
@@ -14,13 +15,6 @@ type HistoryItem = {
   updatedAt: string | null;
   reviewStatus: string | null;
 };
-
-function conclusionClass(label: string) {
-  if (label === "通过") return "tone-pass";
-  if (label === "不通过") return "tone-fail";
-  if (label === "待人工确认") return "tone-review";
-  return "tone-legacy";
-}
 
 export function Workbench() {
   const router = useRouter();
@@ -99,8 +93,8 @@ export function Workbench() {
           <span>待处理</span>
           <strong>{pendingCount}</strong>
         </div>
-        <Link className="dashboard-widget warning" href="/history?review=1">
-          <span>待人工复核</span>
+        <Link className="dashboard-widget warning" href="/history?status=待人工确认">
+          <span>待人工确认</span>
           <strong>{reviewCount}</strong>
         </Link>
         <div className="dashboard-widget success">
@@ -168,35 +162,31 @@ export function Workbench() {
         {history.length === 0 ? (
           <div className="empty"><strong>暂无核验记录</strong><p>完成一次核查后，记录会显示在这里。</p></div>
         ) : (
-          <div className="records-list">
-            <div className="records-head">
-              <span>候选人</span><span>整体结论</span><span>更新时间</span><span />
+          <div className="recent-card">
+            <div className="recent-head">
+              <span>候选人</span>
+              <span>核验状态</span>
+              <span>更新时间</span>
+              <span>查看结果</span>
             </div>
-            {history.slice(0, 6).map((item) => (
-              <Link
-                className="history-row"
-                href={item.status === "COMPLETED" ? `/result/${item.id}` : `/processing/${item.id}`}
-                key={item.id}
-              >
-                <strong>{item.candidateName || "姓名待人工确认"}</strong>
-                <span className={`tone-chip ${conclusionClass(item.overallConclusionLabel)}`}>
-                  {item.status === "FAILED"
-                    ? "处理失败"
-                    : item.status !== "COMPLETED"
-                      ? "处理中"
-                      : item.overallConclusionLabel}
-                </span>
-                <time>
-                  {new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN", {
-                    month: "2-digit",
-                    day: "2-digit",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </time>
-                <i>›</i>
-              </Link>
-            ))}
+            {history.slice(0, 6).map((item) => {
+              const label = displayStatusLabel(item);
+              return (
+                <Link className="recent-row" href={recordHref(item)} key={item.id}>
+                  <strong>{item.candidateName || "姓名待人工确认"}</strong>
+                  <span className={`tone-chip ${statusToneClass(label)}`}>{label}</span>
+                  <time>
+                    {new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN", {
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </time>
+                  <span className="row-cta">查看结果 →</span>
+                </Link>
+              );
+            })}
           </div>
         )}
       </section>

@@ -9,8 +9,8 @@ describe("app chrome controls", () => {
       "工作台",
       "新建核查",
       "核查记录",
-      "待人工复核",
     ]);
+    expect(APP_NAVIGATION.map((item) => item.label)).not.toContain("待人工复核");
     const source = readFileSync(new URL("./app-chrome.tsx", import.meta.url), "utf8");
     expect(source).not.toMatch(/Evidence Workspace/);
     expect(source).not.toMatch(/traffic-lights/);

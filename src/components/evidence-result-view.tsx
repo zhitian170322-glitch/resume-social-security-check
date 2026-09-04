@@ -3,50 +3,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type {
-  HumanReview,
-  HumanReviewStatus,
   RecruiterComparisonRow,
   ResultViewModel,
 } from "@/lib/result-view-model";
-import type { FieldOverride, OverrideField } from "@/lib/manual-override";
-import {
-  companyHighlight,
-  differenceHighlight,
-  highlightLabel,
-  rowStatusHighlight,
-  type FieldHighlight,
-} from "@/lib/result-highlight";
+import type { OverrideField } from "@/lib/manual-override";
+import { fieldOriginFromOverride, fieldOriginLabel } from "@/lib/review-state";
+import { statusToneClass } from "@/lib/status-tone";
 
-const reviewLabels: Record<HumanReviewStatus, string> = {
-  PENDING: "待人工复核",
-  CONFIRMED: "人工已确认",
-  REJECTED: "人工已驳回",
-};
-
-const overrideFields: Array<{ field: OverrideField; label: string }> = [
+const CORE_FIELDS: Array<{ field: OverrideField; label: string }> = [
   { field: "resumeCompany", label: "简历公司" },
+  { field: "resumeStartMonth", label: "简历开始月份" },
+  { field: "resumeEndMonth", label: "简历结束月份" },
   { field: "socialCompany", label: "社保公司" },
-  { field: "position", label: "职位" },
-  { field: "startMonth", label: "开始月份" },
-  { field: "endMonth", label: "结束月份" },
-  { field: "paymentType", label: "缴费类型" },
-  { field: "unitCompany", label: "单位编号对应公司" },
+  { field: "socialStartMonth", label: "社保开始月份" },
+  { field: "socialEndMonth", label: "社保结束月份" },
 ];
-
-function Highlight({
-  kind,
-  children,
-}: {
-  kind: FieldHighlight;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={`hl-cell hl-${kind}`}>
-      <div>{children}</div>
-      {kind !== "plain" && <small>{highlightLabel(kind)}</small>}
-    </div>
-  );
-}
 
 function FieldEvidence({
   evidence,
@@ -54,6 +25,7 @@ function FieldEvidence({
   evidence?: {
     label: string;
     sourceLabel: string;
+    sourceFile?: string | null;
     pageNumber: number | null;
     quote: string;
     conflict: boolean;
@@ -69,11 +41,10 @@ function FieldEvidence({
     <details className={`field-evidence ${evidence.conflict ? "conflict" : ""}`}>
       <summary>识别依据</summary>
       {evidence.conflict && <p className="source-conflict-flag">来源冲突，待确认</p>}
-      <p>
-        来源：{evidence.sourceLabel}
-        {evidence.pageNumber ? ` · 第 ${evidence.pageNumber} 页` : ""}
-      </p>
-      <p className="evidence-quote">{evidence.quote}</p>
+      <p>来源文件：{evidence.sourceFile || "—"}</p>
+      <p>页码：{evidence.pageNumber ?? "—"}</p>
+      <p>识别通道：{evidence.sourceLabel}</p>
+      <p className="evidence-quote">原文片段：{evidence.quote}</p>
       {evidence.alternatives?.map((item) => (
         <p className="evidence-quote" key={`${item.sourceLabel}-${item.quote}`}>
           {item.sourceLabel}
@@ -84,15 +55,32 @@ function FieldEvidence({
   );
 }
 
+function CompanyDiff({ row }: { row: RecruiterComparisonRow }) {
+  if (!row.companyDiff) return null;
+  return (
+    <p className="company-diff" aria-label="公司名称字符差异">
+      <span>
+        {row.companyDiff.left.map((item, index) => (
+          <b key={`l${index}`} className={item.changed ? "diff-char" : undefined}>{item.char}</b>
+        ))}
+      </span>
+      <span className="diff-sep">↔</span>
+      <span>
+        {row.companyDiff.right.map((item, index) => (
+          <b key={`r${index}`} className={item.changed ? "diff-char" : undefined}>{item.char}</b>
+        ))}
+      </span>
+    </p>
+  );
+}
+
 function currentValue(row: RecruiterComparisonRow, field: OverrideField) {
   if (field === "resumeCompany") return row.resumeCompany === "—" ? "" : row.resumeCompany;
-  if (field === "socialCompany" || field === "unitCompany") {
-    return row.socialCompany === "—" ? "" : row.socialCompany;
-  }
-  if (field === "position") return row.position === "—" ? "" : row.position;
-  if (field === "startMonth") return row.resumePeriod.split(" 至 ")[0] ?? "";
-  if (field === "endMonth") return row.endIsPresent ? "至今" : row.resumePeriod.split(" 至 ")[1] ?? "";
-  if (field === "paymentType") return row.personalInsurance ? "personal" : "company";
+  if (field === "socialCompany") return row.socialCompany === "—" ? "" : row.socialCompany;
+  if (field === "resumeStartMonth" || field === "startMonth") return row.resumeStartMonth ?? "";
+  if (field === "resumeEndMonth" || field === "endMonth") return row.resumeEndMonth ?? "";
+  if (field === "socialStartMonth") return row.socialStartMonth ?? "";
+  if (field === "socialEndMonth") return row.socialEndMonth ?? "";
   return "";
 }
 
@@ -108,341 +96,219 @@ export function EvidenceResultView({
   onResultChange?: (next: ResultViewModel) => void;
 }) {
   const searchParams = useSearchParams();
-  const [review, setReview] = useState<HumanReview>(model.humanReview);
-  const [reviewNote, setReviewNote] = useState(model.humanReview.reviewNote ?? "");
-  const [reviewMessage, setReviewMessage] = useState("");
-  const initialReviewId = model.recruiterTable.find(
+  const report = model as Extract<ResultViewModel, { legacy: false }> & {
+    reviewLock?: { locked: boolean };
+    reviewProgress?: {
+      pendingFieldCount: number;
+      confirmedFieldCount: number;
+      correctedFieldCount: number;
+    };
+    conclusionSourceLabel?: string;
+    sourceConflicts?: unknown[];
+  };
+  const [message, setMessage] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [relinkId, setRelinkId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const initialId = model.recruiterTable.find(
     (row) => row.rowStatus === "NEEDS_REVIEW" || row.hasManualOverride,
   )?.id;
   const [selectedId, setSelectedId] = useState(
     searchParams.get("focus") === "review"
-      ? initialReviewId ?? model.recruiterTable[0]?.id ?? ""
+      ? initialId ?? model.recruiterTable[0]?.id ?? ""
       : model.recruiterTable[0]?.id ?? "",
   );
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Record<OverrideField, string>>({
-    resumeCompany: "",
-    socialCompany: "",
-    position: "",
-    startMonth: "",
-    endMonth: "",
-    paymentType: "company",
-    unitCompany: "",
-  });
-  const [expandedMonths, setExpandedMonths] = useState(false);
-  const selectedRow =
-    model.recruiterTable.find((row) => row.id === selectedId) ??
-    model.recruiterTable[0];
-  const summary = model.recruiterSummary;
-  const totals = model.recruiterTotals;
-  const firstReviewId = initialReviewId;
+  const selected = useMemo(
+    () => model.recruiterTable.find((row) => row.id === selectedId) ?? model.recruiterTable[0],
+    [model.recruiterTable, selectedId],
+  );
+  const locked = Boolean(report.reviewLock?.locked);
+  const progress = report.reviewProgress ?? {
+    pendingFieldCount: model.recruiterTable.filter((row) => row.rowStatus === "NEEDS_REVIEW" || row.rowStatus === "RESUME_ONLY" || row.rowStatus === "SOCIAL_ONLY").length,
+    confirmedFieldCount: 0,
+    correctedFieldCount: 0,
+  };
+  const unpairedResume = model.recruiterTable.filter((row) => row.rowStatus === "RESUME_ONLY");
+  const unpairedSocial = model.recruiterTable.filter((row) => row.rowStatus === "SOCIAL_ONLY");
 
   useEffect(() => {
-    if (searchParams.get("focus") === "review" && firstReviewId) {
-      document.getElementById(`row-${firstReviewId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [firstReviewId, searchParams]);
+    if (searchParams.get("focus") !== "review" || !initialId) return;
+    document.getElementById(initialId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [initialId, searchParams]);
 
-  const appliedOverrides = useMemo(
-    () => ((model.fieldOverrides ?? []) as FieldOverride[]).filter((entry) => entry.reviewStatus === "applied"),
-    [model.fieldOverrides],
-  );
-
-  async function saveReview(reviewStatus: HumanReviewStatus) {
-    setReviewMessage("正在保存…");
+  async function patch(body: Record<string, unknown>) {
+    setBusy(true);
+    setMessage("");
     const response = await fetch(`/api/verification/${taskId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reviewStatus, reviewNote }),
+      body: JSON.stringify(body),
     });
-    const payload = await response.json();
+    const data = await response.json();
+    setBusy(false);
     if (!response.ok) {
-      setReviewMessage(payload.message ?? "人工复核保存失败");
-      return;
+      setMessage(data.message || "保存失败");
+      return null;
     }
-    setReview(payload.humanReview);
-    setReviewMessage("已保存，机器结论保持不变");
+    if (data.result && onResultChange) {
+      onResultChange({
+        ...model,
+        recruiterTable: data.result.recruiterTable,
+        recruiterSummary: data.result.recruiterSummary,
+        recruiterTotals: data.result.recruiterTotals,
+        overallConclusion: data.result.overallConclusion,
+        overallConclusionLabel: data.result.overallConclusionLabel,
+        fieldOverrides: data.result.fieldOverrides,
+        reviewLock: data.result.reviewLock,
+        reviewProgress: data.result.reviewProgress,
+        conclusionSourceLabel: data.result.conclusionSourceLabel,
+        sourceConflicts: data.result.sourceConflicts,
+      });
+    }
+    return data;
   }
 
-  function openEdit(row: RecruiterComparisonRow) {
-    setEditingId(row.id);
-    setDraft({
-      resumeCompany: currentValue(row, "resumeCompany"),
-      socialCompany: currentValue(row, "socialCompany"),
-      position: currentValue(row, "position"),
-      startMonth: currentValue(row, "startMonth"),
-      endMonth: currentValue(row, "endMonth"),
-      paymentType: currentValue(row, "paymentType") || "company",
-      unitCompany: currentValue(row, "unitCompany"),
+  async function confirmRow(row: RecruiterComparisonRow, index: number) {
+    await patch({
+      confirmFields: {
+        rowIndex: index,
+        fields: CORE_FIELDS.map((item) => item.field),
+      },
     });
   }
 
-  async function saveOverride(row: RecruiterComparisonRow) {
-    const rowIndex = model.recruiterTable.findIndex((item) => item.id === row.id);
-    for (const { field } of overrideFields) {
-      const nextValue = draft[field]?.trim() || null;
-      const systemValue = currentValue(row, field) || null;
-      if (nextValue === systemValue) continue;
-      const response = await fetch(`/api/verification/${taskId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          manualOverride: {
-            id: `${row.id}-${field}`,
-            rowIndex,
-            field,
-            originalValue: systemValue,
-            systemValue,
-            overrideValue: nextValue,
-          },
-        }),
+  async function saveEdits(row: RecruiterComparisonRow, index: number) {
+    for (const item of CORE_FIELDS) {
+      const next = draft[item.field] ?? currentValue(row, item.field);
+      const previous = currentValue(row, item.field);
+      if (next === previous) continue;
+      await patch({
+        manualOverride: {
+          id: `edit-${index}-${item.field}`,
+          rowIndex: index,
+          field: item.field,
+          originalValue: previous || null,
+          systemValue: previous || null,
+          overrideValue: next || null,
+          kind: "correct",
+        },
       });
-      const payload = await response.json();
-      if (!response.ok) {
-        setReviewMessage(payload.message ?? "人工修正保存失败");
-        return;
-      }
-      if (payload.result && onResultChange) {
-        onResultChange({
-          ...model,
-          recruiterTable: payload.result.recruiterTable,
-          recruiterTotals: payload.result.recruiterTotals,
-          recruiterSummary: payload.result.recruiterSummary,
-          monthDetails: payload.result.monthDetails,
-          monthDetailsText: payload.result.monthDetailsText,
-          fieldOverrides: payload.result.fieldOverrides,
-          overallConclusion: payload.result.overallConclusion,
-          overallConclusionLabel: payload.result.overallConclusionLabel,
-        });
-      }
     }
     setEditingId(null);
   }
 
-  async function revertRow(row: RecruiterComparisonRow) {
-    const related = appliedOverrides.filter((entry) => entry.id.startsWith(`${row.id}-`));
-    for (const entry of related) {
-      const response = await fetch(`/api/verification/${taskId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ revertOverrideId: entry.id }),
-      });
-      const payload = await response.json();
-      if (response.ok && payload.result && onResultChange) {
-        onResultChange({
-          ...model,
-          recruiterTable: payload.result.recruiterTable,
-          recruiterTotals: payload.result.recruiterTotals,
-          recruiterSummary: payload.result.recruiterSummary,
-          monthDetails: payload.result.monthDetails,
-          monthDetailsText: payload.result.monthDetailsText,
-          fieldOverrides: payload.result.fieldOverrides,
-          overallConclusion: payload.result.overallConclusion,
-          overallConclusionLabel: payload.result.overallConclusionLabel,
-        });
-      }
-    }
-  }
-
-  const conclusionLabel = model.overallConclusionLabel ?? summary.conclusionLabel;
-  const monthCards = [
-    ["实际缴费", `${totals.actualPaidMonthCount}个月`, totals.actualPaidDuration],
-    ["折算年限", totals.actualPaidDuration, `${totals.actualPaidMonthCount}个月`],
-    ["公司缴纳", `${totals.companyPaidMonthCount}个月`, ""],
-    ["个人缴纳", `${totals.personalPaidMonthCount}个月`, ""],
-    ["缴费类型待确认", `${totals.unknownPaidMonthCount ?? 0}个月`, ""],
-    ["定薪有效缴纳", `${totals.salaryEffectiveMonthCount}个月`, totals.salaryEffectiveDuration],
-  ] as const;
+  const copyText = model.recruiterSummary.fullText;
 
   return (
-    <>
-      <section className={`result-hero recruiter-hero conclusion-${(model.overallConclusion ?? summary.conclusion).toLowerCase()}`}>
-        <div className="result-icon" aria-hidden="true">
-          {(model.overallConclusion ?? summary.conclusion) === "PASS" ? "✓" : "!"}
-        </div>
+    <section className="v7-result">
+      <div className={`result-hero recruiter-hero conclusion-${model.overallConclusion?.toLowerCase()}`}>
         <div>
-          <p className="eyebrow">核验结果</p>
-          <div className="verdict">整体结论：{conclusionLabel}</div>
-          {summary.detailLines.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-          {model.nameStatus === "mismatch" && <p>姓名不一致，待人工确认</p>}
-          {model.nameStatus === "unknown" && <p>姓名字段待确认</p>}
-          {model.duplicateNotice && <p>{model.duplicateNotice}</p>}
-          {totals.overlapMonthCount ? <p>重叠月份：{totals.overlapMonthCount}个月</p> : null}
-          {(model.sourceConflicts?.length ?? 0) > 0 && (
-            <p className="source-conflict-banner">来源冲突，待确认</p>
+          <p className="eyebrow">整体结论</p>
+          <h2 className="verdict">{model.overallConclusionLabel}</h2>
+          <p>{report.conclusionSourceLabel || model.recruiterSummary.headline}</p>
+        </div>
+        <button className="primary-button" type="button" onClick={() => copy(copyText)}>
+          一键复制核验结果
+        </button>
+      </div>
+
+      <div className="review-progress">
+        <span>待确认字段 {progress.pendingFieldCount}</span>
+        <span>已人工确认 {progress.confirmedFieldCount}</span>
+        <span>已人工修正 {progress.correctedFieldCount}</span>
+        <span>复核进度 {progress.pendingFieldCount === 0 ? "可锁定" : "未完成"}</span>
+      </div>
+
+      {model.sourceConflicts && model.sourceConflicts.length > 0 && (
+        <p className="source-conflict-banner">来源冲突，待确认</p>
+      )}
+
+      <div className="review-lock-bar">
+        {locked ? (
+          <button type="button" className="soft-button" disabled={busy} onClick={() => patch({ unlockReview: true })}>
+            解除锁定
+          </button>
+        ) : (
+          <button type="button" className="primary-button" disabled={busy} onClick={() => patch({ lockReview: true })}>
+            完成复核并锁定
+          </button>
+        )}
+        {message && <p className="form-error">{message}</p>}
+      </div>
+
+      {(unpairedResume.length > 0 || unpairedSocial.length > 0) && (
+        <section className="unpaired-panel">
+          <h3>未配对记录</h3>
+          {unpairedResume.length > 0 && (
+            <p>简历有、社保未找到：{unpairedResume.map((row) => row.resumeCompany).join("、")}</p>
           )}
-        </div>
-        <div className="trust-row">
-          <button className="soft-button" onClick={() => copy(summary.fullText)}>
-            复制完整核验结果
-          </button>
-        </div>
-      </section>
-
-      <section className="stat-grid recruiter-totals">
-        {monthCards.map(([label, value]) => (
-          <button
-            className="stat month-card"
-            key={label}
-            onClick={() => setExpandedMonths((current) => !current)}
-            type="button"
-          >
-            <span>{label}</span>
-            <b className="nowrap">{value}</b>
-          </button>
-        ))}
-      </section>
-
-      {expandedMonths && (
-        <section className="month-detail-panel">
-          <div className="section-heading">
-            <h2>月份明细</h2>
-            <div className="table-actions">
-              <button className="soft-button" onClick={() => copy(model.monthDetailsText || "待人工确认")}>
-                复制月份明细
-              </button>
-              <button
-                className="soft-button"
-                onClick={() => copy(selectedRow?.socialStandardText || "待人工确认")}
-              >
-                复制社保标准信息
-              </button>
-            </div>
-          </div>
-          <div className="history-table-wrap">
-            <table className="history-table">
-              <thead>
-                <tr>
-                  <th>月份</th>
-                  <th>单位编号</th>
-                  <th>单位名称</th>
-                  <th>缴费类型</th>
-                  <th>来源文件</th>
-                  <th>来源页</th>
-                  <th>识别来源</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(model.monthDetails ?? []).map((item) => (
-                  <tr key={`${item.month}-${item.unitCode}-${item.companyRaw}`}>
-                    <td className="nowrap">{item.month}</td>
-                    <td>{item.unitCode ?? "待人工确认"}</td>
-                    <td className="company-name">{item.companyRaw ?? "待人工确认"}</td>
-                    <td>
-                      {item.paymentType === "personal"
-                        ? "个人缴纳"
-                        : item.paymentType === "company"
-                          ? "公司缴纳"
-                          : "缴费类型待确认"}
-                    </td>
-                    <td>{item.sourceFile ?? "待人工确认"}</td>
-                    <td>{item.sourcePage ?? "待人工确认"}</td>
-                    <td>{item.origin === "manual" ? "人工修正" : "系统识别"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {unpairedSocial.length > 0 && (
+            <p>社保有、简历未体现：{unpairedSocial.map((row) => row.socialCompany).join("、")}</p>
+          )}
         </section>
       )}
 
-      <section className="table-card recruiter-table-card desktop-result-table">
-        <div className="section-heading">
-          <h2>完整核验表</h2>
-          <button className="soft-button" onClick={() => copy(summary.fullText)}>
-            复制完整核验结果
-          </button>
-        </div>
+      <div className="table-card recruiter-table-card desktop-result-table">
         <div className="result-table-scroll">
           <table>
             <thead>
               <tr>
-                <th colSpan={3} className="group-resume">简历申报</th>
-                <th colSpan={3} className="group-social">社保事实依据</th>
-                <th colSpan={5} className="group-result">核验结果</th>
-              </tr>
-              <tr>
-                <th className="group-resume">简历公司</th>
-                <th className="group-resume">职位</th>
-                <th className="group-resume">简历时间</th>
-                <th className="group-social">社保公司</th>
-                <th className="group-social">社保时间</th>
-                <th className="group-social">实际缴费月数</th>
-                <th>公司是否一致</th>
-                <th>开始月份差</th>
-                <th>结束月份差</th>
-                <th>该段结果</th>
+                <th>序号</th>
+                <th>简历公司</th>
+                <th>简历工作时间</th>
+                <th>社保公司</th>
+                <th>社保缴费时间</th>
+                <th>公司匹配</th>
+                <th>开始月份匹配</th>
+                <th>结束月份匹配</th>
+                <th>该段结论</th>
                 <th>操作</th>
               </tr>
             </thead>
             <tbody>
-              {model.recruiterTable.map((row) => (
+              {model.recruiterTable.map((row, index) => (
                 <tr
-                  id={`row-${row.id}`}
-                  className={row.id === selectedRow?.id ? "selected" : ""}
+                  id={row.id}
                   key={row.id}
+                  className={row.id === selectedId ? "selected" : ""}
                   onClick={() => setSelectedId(row.id)}
                 >
-                  <td className="cell-resume company-name">
-                    {row.resumeCompany}
+                  <td>{row.index}</td>
+                  <td className="company-cell">
+                    <b className="company-name">{row.resumeCompany}</b>
+                    <CompanyDiff row={row} />
                     <FieldEvidence evidence={row.fieldEvidence?.resumeCompany} />
                   </td>
-                  <td className="cell-resume">
-                    {row.position}
-                    <FieldEvidence evidence={row.fieldEvidence?.position} />
-                  </td>
-                  <td className="cell-resume">
-                    <span className="nowrap">{row.resumePeriod}</span>
-                    <FieldEvidence evidence={row.fieldEvidence?.startMonth} />
-                  </td>
-                  <td className="cell-social company-name">
-                    {row.socialCompany}
+                  <td className="nowrap">{row.resumePeriod}</td>
+                  <td className="company-cell">
+                    <b className="company-name">{row.socialCompany}</b>
                     <FieldEvidence evidence={row.fieldEvidence?.socialCompany} />
                   </td>
-                  <td className="cell-social">
-                    <span className="nowrap">{row.socialPeriod}</span>
-                    <FieldEvidence evidence={row.fieldEvidence?.endMonth} />
-                  </td>
-                  <td className="cell-social nowrap">{row.paidMonthLabel}</td>
-                  <td>
-                    <Highlight kind={companyHighlight(row.companyConsistentLabel)}>
-                      {row.companyConsistentLabel}
-                    </Highlight>
-                  </td>
-                  <td>
-                    <Highlight kind={differenceHighlight(row.startDifferenceLabel)}>
-                      {row.startDifferenceLabel}
-                    </Highlight>
-                  </td>
-                  <td>
-                    <Highlight kind={differenceHighlight(row.endDifferenceLabel)}>
-                      {row.endDifferenceLabel}
-                    </Highlight>
-                  </td>
-                  <td>
-                    <Highlight kind={row.hasManualOverride ? "override" : rowStatusHighlight(row.rowStatus)}>
-                      {row.rowStatusLabel}
-                    </Highlight>
-                  </td>
+                  <td className="nowrap">{row.socialPeriod}</td>
+                  <td><span className={`tone-chip ${statusToneClass(row.companyConsistentLabel)}`}>{row.companyConsistentLabel}</span></td>
+                  <td><span className={`tone-chip ${statusToneClass(row.startDifferenceLabel)}`}>{row.startDifferenceLabel}</span></td>
+                  <td><span className={`tone-chip ${statusToneClass(row.endDifferenceLabel)}`}>{row.endDifferenceLabel}</span></td>
+                  <td><span className={`tone-chip ${statusToneClass(row.rowStatusLabel)}`}>{row.rowStatusLabel}</span></td>
                   <td>
                     <div className="table-actions">
-                      <button className="copy-button" onClick={(event) => { event.stopPropagation(); void copy(row.itemText); }}>
-                        复制该段结果
-                      </button>
-                      <button className="copy-button" onClick={(event) => { event.stopPropagation(); void copy(row.socialStandardText); }}>
-                        复制社保标准信息
-                      </button>
-                      <button className="copy-button" onClick={(event) => { event.stopPropagation(); void copy(row.correctionReference); }}>
-                        复制修正参考
-                      </button>
-                      <button className="copy-button" onClick={(event) => { event.stopPropagation(); openEdit(row); }}>
-                        人工修正
-                      </button>
+                      <button type="button" className="copy-button" disabled={locked} onClick={() => confirmRow(row, index)}>确认无误</button>
+                      <button type="button" className="copy-button" disabled={locked} onClick={() => {
+                        setEditingId(row.id);
+                        setDraft(Object.fromEntries(CORE_FIELDS.map((item) => [item.field, currentValue(row, item.field)])));
+                      }}>修改字段</button>
+                      <button type="button" className="copy-button" disabled={locked} onClick={() => setRelinkId(row.id)}>重新关联</button>
                       {row.hasManualOverride && (
-                        <button className="copy-button" onClick={(event) => { event.stopPropagation(); void revertRow(row); }}>
-                          撤销人工修正
+                        <button
+                          type="button"
+                          className="copy-button"
+                          disabled={locked}
+                          onClick={() => patch({
+                            revertOverrideId: (model.fieldOverrides as Array<{ id: string; rowIndex: number }> | undefined)
+                              ?.find((item) => item.rowIndex === index)?.id,
+                          })}
+                        >
+                          撤销修改
                         </button>
                       )}
                     </div>
@@ -452,140 +318,143 @@ export function EvidenceResultView({
             </tbody>
           </table>
         </div>
-      </section>
+      </div>
 
-      <section className="mobile-result-cards">
-        {model.recruiterTable.map((row) => (
-          <article className="mobile-experience" id={`mobile-${row.id}`} key={row.id}>
-            <section className="source-card resume-card">
-              <h3>简历申报</h3>
+      <div className="mobile-result-cards">
+        {model.recruiterTable.map((row, index) => (
+          <article className="mobile-experience v7-card" key={row.id}>
+            <div className="source-card resume-card">
+              <h3>简历</h3>
               <p className="company-name">{row.resumeCompany}</p>
-              <FieldEvidence evidence={row.fieldEvidence?.resumeCompany} />
-              <p>{row.position}</p>
               <p className="nowrap">{row.resumePeriod}</p>
-              {(row.hasSourceConflict || row.fieldEvidence?.resumeCompany?.conflict) && (
-                <p className="source-conflict-banner">来源冲突，待确认</p>
-              )}
-            </section>
-            <section className="source-card social-card">
-              <h3>社保事实依据</h3>
+              <FieldEvidence evidence={row.fieldEvidence?.resumeCompany} />
+            </div>
+            <div className="source-card social-card">
+              <h3>社保</h3>
               <p className="company-name">{row.socialCompany}</p>
-              <FieldEvidence evidence={row.fieldEvidence?.socialCompany} />
               <p className="nowrap">{row.socialPeriod}</p>
-              <p className="nowrap">{row.paidMonthLabel}</p>
-              {row.verificationBaseline && (
-                <p className="nowrap">核验基准：{row.verificationBaseline}</p>
-              )}
-            </section>
-            <section className="source-card result-card">
-              <h3>核验结果</h3>
-              <Highlight kind={companyHighlight(row.companyConsistentLabel)}>
-                公司是否一致：{row.companyConsistentLabel}
-              </Highlight>
-              <Highlight kind={differenceHighlight(row.startDifferenceLabel)}>
-                开始月份差：{row.startDifferenceLabel}
-              </Highlight>
-              <Highlight kind={differenceHighlight(row.endDifferenceLabel)}>
-                结束月份差：{row.endDifferenceLabel}
-              </Highlight>
-              <Highlight kind={row.hasManualOverride ? "override" : rowStatusHighlight(row.rowStatus)}>
-                结论：{row.rowStatusLabel}
-              </Highlight>
-              <p>{row.reason}</p>
+              <FieldEvidence evidence={row.fieldEvidence?.socialCompany} />
+            </div>
+            <div className="source-card result-card">
+              <p>公司匹配：{row.companyConsistentLabel}</p>
+              <p>开始月份：{row.startDifferenceLabel}</p>
+              <p>结束月份：{row.endDifferenceLabel}</p>
+              <p>该段结论：{row.rowStatusLabel}</p>
+              <p>{row.matchScoreLabel}</p>
+              <CompanyDiff row={row} />
               <div className="table-actions">
-                <button className="copy-button" onClick={() => copy(row.itemText)}>复制该段结果</button>
-                <button className="copy-button" onClick={() => copy(row.socialStandardText)}>复制社保标准信息</button>
-                <button className="copy-button" onClick={() => copy(row.correctionReference)}>复制修正参考</button>
-                <button className="copy-button" onClick={() => openEdit(row)}>人工修正</button>
-                {row.hasManualOverride && (
-                  <button className="copy-button" onClick={() => revertRow(row)}>撤销人工修正</button>
-                )}
+                <button type="button" className="copy-button" disabled={locked} onClick={() => confirmRow(row, index)}>确认无误</button>
+                <button type="button" className="copy-button" disabled={locked} onClick={() => {
+                  setEditingId(row.id);
+                  setDraft(Object.fromEntries(CORE_FIELDS.map((item) => [item.field, currentValue(row, item.field)])));
+                }}>修改字段</button>
+                <button type="button" className="copy-button" disabled={locked} onClick={() => setRelinkId(row.id)}>重新关联</button>
               </div>
-            </section>
+            </div>
           </article>
         ))}
-      </section>
+      </div>
 
-      {selectedRow && (
-        <article className="experience-card recruiter-detail-card">
-          <div className="experience-title">
-            <div>
-              <small>第 {selectedRow.index} 段对照</small>
-              <h3 className="company-name">
-                {selectedRow.resumeCompany !== "—" ? selectedRow.resumeCompany : selectedRow.socialCompany}
-              </h3>
-            </div>
-            <span className={`badge ${selectedRow.rowStatus === "PASS" ? "" : "warn"}`}>
-              {selectedRow.rowStatusLabel}
-            </span>
-          </div>
-          {selectedRow.hasManualOverride && <p className="hl-override-flag">已人工修正</p>}
-          {selectedRow.endIsPresent && (
-            <p className="nowrap">
-              简历结束：至今 · 社保截止：{selectedRow.socialPeriod.split(" 至 ")[1] ?? "待人工确认"} · 核验基准：{selectedRow.verificationBaseline ?? "待人工确认"}
-            </p>
-          )}
-          <p className={selectedRow.rowStatus === "PASS" ? "result-note" : "difference"}>
-            {selectedRow.reason}
-          </p>
-        </article>
-      )}
-
-      {editingId && selectedRow && (
-        <section className="override-panel">
-          <h2>人工修正</h2>
-          <p>不修改原始 PDF、图片、简历文字或 OCR 原文。保存后立即重新配对和计算。</p>
+      {selected && editingId === selected.id && (
+        <form
+          className="override-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveEdits(selected, model.recruiterTable.indexOf(selected));
+          }}
+        >
+          <h3>修改字段</h3>
+          <p>人工只能改事实字段。保存后系统重新严格比较。</p>
           <div className="override-grid">
-            {overrideFields.map(({ field, label }) => (
-              <label key={field}>
-                {label}
-                {field === "paymentType" ? (
-                  <select
-                    value={draft.paymentType}
-                    onChange={(event) => setDraft({ ...draft, paymentType: event.target.value })}
-                  >
-                    <option value="company">公司缴纳</option>
-                    <option value="personal">个人缴纳</option>
-                    <option value="unknown">缴费类型待确认</option>
-                  </select>
+            {CORE_FIELDS.map((item) => (
+              <label key={item.field}>
+                {item.label}
+                <small>
+                  {fieldOriginLabel(
+                    fieldOriginFromOverride(
+                      (model.fieldOverrides as Array<{
+                        field: string;
+                        reviewStatus?: string;
+                        kind?: "confirm" | "correct";
+                        rowIndex?: number;
+                      }> | undefined)?.find(
+                        (entry) =>
+                          entry.field === item.field &&
+                          entry.rowIndex === model.recruiterTable.indexOf(selected),
+                      ) as never,
+                      selected.rowStatus === "NEEDS_REVIEW" ||
+                        selected.rowStatus === "RESUME_ONLY" ||
+                        selected.rowStatus === "SOCIAL_ONLY",
+                    ),
+                  )}
+                </small>
+                {item.field.includes("Month") ? (
+                  <input
+                    type="month"
+                    value={draft[item.field] ?? ""}
+                    onChange={(event) => setDraft({ ...draft, [item.field]: event.target.value })}
+                  />
                 ) : (
                   <input
-                    value={draft[field]}
-                    onChange={(event) => setDraft({ ...draft, [field]: event.target.value })}
+                    value={draft[item.field] ?? ""}
+                    onChange={(event) => setDraft({ ...draft, [item.field]: event.target.value })}
                   />
                 )}
+                <FieldEvidence
+                  evidence={
+                    item.field.startsWith("social")
+                      ? selected.fieldEvidence?.socialCompany
+                      : item.field.includes("start")
+                        ? selected.fieldEvidence?.startMonth
+                        : item.field.includes("end")
+                          ? selected.fieldEvidence?.endMonth
+                          : selected.fieldEvidence?.resumeCompany
+                  }
+                />
               </label>
             ))}
           </div>
-          <div className="table-actions">
-            <button className="soft-button" onClick={() => saveOverride(selectedRow)}>保存并重算</button>
-            <button className="soft-button" onClick={() => setEditingId(null)}>取消</button>
+          <div className="modal-actions">
+            <button type="button" onClick={() => setEditingId(null)}>取消</button>
+            <button className="primary-button" type="submit" disabled={busy}>保存并重算</button>
           </div>
-        </section>
+        </form>
       )}
 
-      <section className="summary-card human-review-card">
-        <div>
-          <p className="eyebrow">人工复核</p>
-          <h2>{reviewLabels[review.reviewStatus]}</h2>
-          <p>机器原始结论：{conclusionLabel}</p>
-        </div>
-        <label>
-          复核备注
-          <textarea
-            maxLength={2000}
-            onChange={(event) => setReviewNote(event.target.value)}
-            placeholder="记录人工判断依据，不会修改原始字段"
-            value={reviewNote}
-          />
-        </label>
-        <div className="review-actions">
-          <button className="soft-button" onClick={() => saveReview("PENDING")}>标记待复核</button>
-          <button className="review-confirm" onClick={() => saveReview("CONFIRMED")}>确认机器结果</button>
-          <button className="review-reject" onClick={() => saveReview("REJECTED")}>驳回机器结果</button>
-        </div>
-        {reviewMessage && <p className="muted">{reviewMessage}</p>}
-      </section>
-    </>
+      {selected && relinkId === selected.id && (
+        <form
+          className="override-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const socialSourceId = (event.currentTarget.elements.namedItem("socialSourceId") as HTMLSelectElement).value;
+            if (selected.resumeSourceId) {
+              patch({ relink: { resumeSourceId: selected.resumeSourceId, socialSourceId } });
+            }
+            setRelinkId(null);
+          }}
+        >
+          <h3>重新关联</h3>
+          <label>
+            选择社保记录
+            <select name="socialSourceId" defaultValue={selected.socialSourceId ?? ""}>
+              {model.recruiterTable
+                .filter((row) => row.socialSourceId)
+                .map((row) => (
+                  <option key={row.socialSourceId} value={row.socialSourceId}>
+                    {row.socialCompany} {row.socialPeriod}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <div className="modal-actions">
+            <button type="button" onClick={() => selected.resumeSourceId && patch({ unlink: { resumeSourceId: selected.resumeSourceId } })}>
+              撤销关联
+            </button>
+            <button type="button" onClick={() => setRelinkId(null)}>取消</button>
+            <button className="primary-button" type="submit">保存关联</button>
+          </div>
+        </form>
+      )}
+    </section>
   );
 }
