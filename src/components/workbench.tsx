@@ -56,9 +56,7 @@ export function Workbench() {
   }
 
   const pendingCount = history.filter((item) => !["COMPLETED", "FAILED"].includes(item.status)).length;
-  const reviewCount = history.filter(
-    (item) => item.overallConclusion === "NEEDS_REVIEW" || item.reviewStatus === "PENDING",
-  ).length;
+  const reviewCount = history.filter((item) => item.overallConclusion === "NEEDS_REVIEW").length;
   const completedToday = history.filter((item) => {
     const created = new Date(item.createdAt);
     const today = new Date();

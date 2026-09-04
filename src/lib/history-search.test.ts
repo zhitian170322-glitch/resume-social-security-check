@@ -29,13 +29,15 @@ describe("history search and review queue", () => {
     expect(matchesHistorySearch(record, { from: "2026-08-02" })).toBe(false);
   });
 
-  it("treats pending review as overallConclusion or reviewStatus", () => {
+  it("treats pending review as overallConclusion NEEDS_REVIEW, not default reviewStatus", () => {
     expect(isPendingReview(record)).toBe(true);
-    expect(isPendingReview({ overallConclusion: "FAIL", reviewStatus: "PENDING" })).toBe(true);
+    expect(isPendingReview({ overallConclusion: "FAIL", reviewStatus: "PENDING" })).toBe(false);
+    expect(isPendingReview({ overallConclusion: "PASS", reviewStatus: "PENDING" })).toBe(false);
     expect(isPendingReview({ overallConclusion: "PASS", reviewStatus: "CONFIRMED" })).toBe(false);
     expect(matchesHistorySearch({ ...record, overallConclusion: "FAIL" }, { reviewOnly: true })).toBe(
-      true,
+      false,
     );
+    expect(matchesHistorySearch(record, { reviewOnly: true })).toBe(true);
   });
 
   it("does not infer 完全一致 from a completed legacy task", () => {

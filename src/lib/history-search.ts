@@ -51,7 +51,7 @@ export function companiesFromResult(result: unknown): {
 }
 
 export function isPendingReview(record: Pick<HistorySearchRecord, "overallConclusion" | "reviewStatus">) {
-  return record.overallConclusion === "NEEDS_REVIEW" || record.reviewStatus === "PENDING";
+  return record.overallConclusion === "NEEDS_REVIEW";
 }
 
 export function matchesHistorySearch(record: HistorySearchRecord, query: HistorySearchQuery) {
