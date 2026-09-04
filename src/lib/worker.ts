@@ -48,7 +48,7 @@ import {
 } from "./simple-verification";
 import { applyFieldOverrides, type FieldOverride } from "./manual-override";
 import { TaskCancelledError, readCancelState } from "./task-lifecycle";
-import type { ManualLink, ReviewAuditEntry, ReviewLock } from "./review-state";
+import type { ReviewAuditEntry, ReviewLock } from "./review-state";
 import {
   type DocumentPage,
   DocumentPageSchema,

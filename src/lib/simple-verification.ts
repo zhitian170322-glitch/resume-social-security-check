@@ -764,8 +764,6 @@ export function buildSimpleTotals(rows: SimpleComparisonRow[]): RecruiterTotals 
 function buildSummary(
   candidateName: string,
   rows: RecruiterComparisonRow[],
-  _totals?: RecruiterTotals,
-  _overrides?: Array<Record<string, unknown>>,
 ): RecruiterSummary {
   const passCount = rows.filter((row) => row.rowStatus === "PASS").length;
   const failCount = rows.filter((row) => row.rowStatus === "FAIL").length;
@@ -894,12 +892,7 @@ export function verifyResumeAndSocial(input: {
     actualPaidDuration: "—",
     salaryEffectiveDuration: "—",
   };
-  const recruiterSummary = buildSummary(
-    input.candidateName,
-    recruiterTable,
-    recruiterTotals,
-    input.overrides,
-  );
+  const recruiterSummary = buildSummary(input.candidateName, recruiterTable);
   const nameCompared = namesMatch(input.candidateName, input.socialName);
   const nameStatus: "match" | "mismatch" | "unknown" =
     nameCompared === true ? "match" : nameCompared === false ? "mismatch" : "unknown";
