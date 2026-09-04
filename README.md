@@ -1,8 +1,8 @@
 # 简历与社保严格核验
 
-以社保缴纳记录为事实依据，逐段对照简历工作经历，并按逐月去重结果计算定薪有效社保年限。
+以社保缴纳记录为事实依据，逐段对照简历公司完整名称与起止月份。候选人姓名只用于标识任务，不参与核验结论。
 
-自动通过必须同时满足：公司主体一致、开始月份差 = 0、结束月份差 = 0。相差 1 个月也不通过。简称、母子公司、集团与子公司、总分公司不得模糊自动通过。
+自动通过必须同时满足：公司完整法律名称一致、开始月份差 = 0、结束月份差 = 0。相差 1 个月也不通过。简称、母子公司、集团与子公司、总分公司不得模糊自动通过。职位、实际缴费月数和定薪有效月数不再参与核验或展示。
 
 ## 业务主链
 
@@ -10,7 +10,7 @@
 
 DeepSeek 只返回候选人姓名和经历原文字段，不判断通过、不配对社保、不修改公司原文、不计算月份差或缴费年限。
 
-新任务使用 `schemaVersion: 6`。简历每页同时保留原生文字和 General OCR，社保继续 Table OCR + General OCR。来源合并由 TypeScript 确定性规则完成，不用 AI 选边。旧 schema 2、4、5 只读展示，不自动改写或重算；无法解释时显示“旧版记录”。不得把 `task completed` 显示为完全一致。
+新任务使用 `schemaVersion: 7`。简历每页同时保留原生文字和 General OCR，社保继续 Table OCR + General OCR。来源合并由 TypeScript 确定性规则完成，不用 AI 选边。旧 schema 2、4、5、6 只读展示，不自动改写或重算；无法解释时显示“旧版记录”。不得把 `task completed` 显示为完全一致。
 
 ## 本地运行
 
@@ -34,7 +34,7 @@ npm run test
 npm run build
 ```
 
-脱敏真实结构测试位于 `tests/v5-anonymized-structure.test.ts` 和 `tests/v6-hybrid-ocr.test.ts`，不调用真实 DeepSeek 或阿里云 API。生产真实材料验收见 `docs/v6-local-manual-qa.md`，真实材料不得进入仓库。
+脱敏真实结构测试位于 `tests/v5-anonymized-structure.test.ts`、`tests/v6-hybrid-ocr.test.ts` 和 `tests/v7-core-review.test.ts`，不调用真实 DeepSeek 或阿里云 API。生产真实材料验收见 `docs/v6-local-manual-qa.md`，真实材料不得进入仓库。
 
 ## Docker 与现有 Caddy 部署
 
@@ -54,7 +54,7 @@ Compose 只将应用绑定到宿主机 `127.0.0.1` 对应端口，不启动新�
 ./scripts/deploy-update.sh 更新包.tar.gz 更新包.tar.gz.sha256
 ```
 
-`deploy-update.sh` 默认 dry-run，不连接生产服务器。它会校验明确路径、SHA256、磁盘和内存、更新包内容，并检查 Compose/Dockerfile 约束。远程 `--apply` 为 `MANUAL_ONLY`，本仓库不声称支持正式远程部署。服务器本机部署必须同时传入 `--apply-local --confirm=APPLY-LOCAL`。构建使用不可变标签 `resume-social-security-check:v6-<shortSha>`，必须 `docker image inspect` 确认镜像存在后才能提升 `latest`。systemd `Result=success` 不能代替镜像存在。
+`deploy-update.sh` 默认 dry-run，不连接生产服务器。它会校验明确路径、SHA256、磁盘和内存、更新包内容，并检查 Compose/Dockerfile 约束。远程 `--apply` 为 `MANUAL_ONLY`，本仓库不声称支持正式远程部署。服务器本机部署必须同时传入 `--apply-local --confirm=APPLY-LOCAL --app-dir=<生产根目录>`。禁止默认使用 `/home/admin`。SQLite 必须通过运行中容器 Docker Mount 解析。构建使用不可变标签 `resume-social-security-check:v7-<shortSha>`，必须 `docker image inspect` 确认镜像存在后才能提升 `latest`。systemd `Result=success` 不能代替镜像存在。
 
 更新包不得包含 `.env`、密钥、SQLite、uploads、真实 PDF/图片、真实 OCR 原文、`node_modules`、构建缓存或 Git 脏文件。
 
@@ -63,10 +63,10 @@ Compose 只将应用绑定到宿主机 `127.0.0.1` 对应端口，不启动新�
 - 单位编号优先从 Table OCR 行级对应映射到单位名称；Table 不可用时按 General OCR 编号列表与名称列表顺序映射。
 - 不得把数字编号当作公司名称，不得用 AI 猜测对应关系。
 - 只清除公司名前独立出现且带冒号的行政区域标签；法律名称中的“深圳市”等不得删除。
-- 个人缴费窗口 / 个人缴费 / 灵活就业 → personal；明确公司法律主体 → company；无法确认 → unknown。unknown 计入全部实际缴费，不计入公司、个人和定薪有效缴纳。
-- 所有月数从最终逐月记录去重计算。年限格式固定为 `85个月 = 7年1个月`，禁止小数年，禁止断行。
-- 配对与公司一致分离：日期只能帮助配对，不能弥补公司名称不一致。
-- 简历写“至今”时，使用对应社保最后实际缴费月份作为核验基准，禁止使用服务器当前月份。
+- 个人缴费窗口 / 个人缴费 / 灵活就业 → 待人工确认，不自动通过。
+- 不再计算或展示实际缴费月数、定薪有效月数。
+- 不得为表格整齐而强行配对；未配对记录保持待确认。
+- 简历写“至今”时不得自动猜测结束月份，必须人工确认后才能严格比较。
 - 同一任务中重复文件（SHA256）或重复页面（OCR 文本指纹）只提取一次，不删除用户上传，不视为核验不通过。
 - 人工修正保存在版本化 `result_json` 中，包含 original/system/override/reviewStatus/updatedAt；保存后立即重算；无登录系统记录为 `manual-review`。
 

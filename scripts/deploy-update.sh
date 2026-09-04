@@ -2,9 +2,9 @@
 set -euo pipefail
 
 usage() {
-  echo "用法: $0 更新包.tar.gz 更新包.tar.gz.sha256 [--apply-local --confirm=APPLY-LOCAL]" >&2
+  echo "用法: $0 更新包.tar.gz 更新包.tar.gz.sha256 [--apply-local --confirm=APPLY-LOCAL --app-dir=/abs/prod/root]" >&2
   echo "默认 dry-run，只校验包，不改容器、不改数据库、不连接生产。" >&2
-  echo "MODE=MANUAL_ONLY：不支持远程 --apply。本机部署必须同时传入 --apply-local 和 --confirm=APPLY-LOCAL。" >&2
+  echo "MODE=MANUAL_ONLY：不支持远程 --apply。本机部署必须同时传入 --apply-local、--confirm=APPLY-LOCAL 和明确的 --app-dir。" >&2
   exit 2
 }
 
@@ -18,6 +18,8 @@ for arg in "$@"; do
     MODE="manual-only"
   elif [[ "$arg" == --confirm=* ]]; then
     CONFIRM="${arg#--confirm=}"
+  elif [[ "$arg" == --app-dir=* ]]; then
+    APP_DIR="${arg#--app-dir=}"
   else
     ARGS+=("$arg")
   fi
@@ -36,7 +38,7 @@ CURL_BIN="${CURL_BIN:-curl}"
 APP_SERVICE="${APP_SERVICE:-resume-social-security-check-app}"
 IMAGE_REPO="${IMAGE_REPO:-resume-social-security-check}"
 HEALTH_URL="${HEALTH_URL:-https://check.orangeito.com}"
-APP_DIR="${DEPLOY_APP_DIR:-}"
+APP_DIR="${APP_DIR:-${DEPLOY_APP_DIR:-}}"
 
 if [[ "$PACKAGE" == *"*"* || "$CHECKSUM" == *"*"* || "$PACKAGE" == "-" || "$CHECKSUM" == "-" ]]; then
   echo "必须使用明确文件路径，禁止通配符或标准输入。" >&2
@@ -104,17 +106,19 @@ SHORT_SHA="$(basename "$PACKAGE" | sed -n 's/.*update-\([0-9a-f]\{7,40\}\).*/\1/
 if [[ -z "$SHORT_SHA" ]]; then
   SHORT_SHA="unknown"
 fi
-IMAGE_TAG="v6-${SHORT_SHA:0:7}"
+IMAGE_TAG="v7-${SHORT_SHA:0:7}"
 
 echo "==> dry-run 计划"
 cat <<PLAN
 MODE=MANUAL_ONLY：远程 --apply 不受支持，禁止把 dry-run 当成可正式部署。
-本机模式必须同时传入 --apply-local --confirm=APPLY-LOCAL。
+本机模式必须同时传入 --apply-local --confirm=APPLY-LOCAL --app-dir=<生产根目录>。
+禁止把 /home/admin 或当前工作目录当成默认生产根目录。
 将执行（仅 --apply-local 且确认后）:
 1. 校验包 SHA256 与包内容
 2. 检查磁盘和内存
-3. 备份当前代码目录，不覆盖生产 .env
-4. sqlite3 .backup 并 PRAGMA integrity_check
+3. 先验证生产根目录、.env 和 SQLite 路径，通过前禁止写操作
+4. 只备份应用源码目录，不备份整个 /home/admin
+5. 从运行中容器 Docker Mount 解析 SQLite，禁止假设 /home/admin/data/app.db
 5. 给旧镜像打 rollback 标签
 6. 使用不可变标签构建 ${IMAGE_REPO}:${IMAGE_TAG}
 7. docker image inspect 确认镜像存在；systemd Result=success 不能代替镜像存在
@@ -132,7 +136,7 @@ fi
 
 if [[ "$MODE" == "manual-only" ]]; then
   echo "MANUAL_ONLY: 远程 --apply 未实现。本仓库禁止声称支持正式远程部署。" >&2
-  echo "如需服务器本机部署，请使用: $0 包.tar.gz 包.tar.gz.sha256 --apply-local --confirm=APPLY-LOCAL" >&2
+  echo "如需服务器本机部署，请使用: $0 包.tar.gz 包.tar.gz.sha256 --apply-local --confirm=APPLY-LOCAL --app-dir=/abs/prod/root" >&2
   exit 1
 fi
 
@@ -207,20 +211,76 @@ restore_previous() {
   fi
 }
 
-apply_local() {
-  if [[ -z "$APP_DIR" ]]; then
-    APP_DIR="$(pwd)"
-  fi
-  if [[ ! -d "$APP_DIR" ]]; then
-    echo "部署目录不存在: $APP_DIR" >&2
+validate_prod_root() {
+  local root="$1"
+  if [[ -z "$root" ]]; then
+    echo "必须通过 --app-dir 或 DEPLOY_APP_DIR 指定明确的生产根目录。禁止默认使用 /home/admin 或当前目录。" >&2
     exit 1
   fi
-  local ts backup_dir extract_dir rollback_tag old_id new_id db_path db_backup compose
+  if [[ "$root" != /* ]]; then
+    echo "生产根目录必须是绝对路径: $root" >&2
+    exit 1
+  fi
+  if [[ "$root" == "/home/admin" || "$root" == /home/admin/* && "$root" != /home/admin/*/* ]]; then
+    if [[ "$root" == "/home/admin" ]]; then
+      echo "拒绝把 /home/admin 识别为生产根目录。" >&2
+      exit 1
+    fi
+  fi
+  if [[ "$root" == "/home/admin" ]]; then
+    echo "拒绝把 /home/admin 识别为生产根目录。" >&2
+    exit 1
+  fi
+  if [[ ! -d "$root" ]]; then
+    echo "生产根目录不存在: $root" >&2
+    exit 1
+  fi
+  if [[ ! -f "$root/docker-compose.yml" && ! -f "$root/Dockerfile" ]]; then
+    echo "生产根目录缺少应用源码标志文件: $root" >&2
+    exit 1
+  fi
+}
+
+resolve_sqlite_path() {
+  local root="$1"
+  if [[ -n "${SQLITE_PATH:-}" ]]; then
+    if [[ ! -f "$SQLITE_PATH" ]]; then
+      echo "SQLite 路径不存在: $SQLITE_PATH" >&2
+      return 1
+    fi
+    echo "$SQLITE_PATH"
+    return 0
+  fi
+  local mount
+  mount="$("$DOCKER_BIN" inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$APP_SERVICE" 2>/dev/null || true)"
+  if [[ -n "$mount" && -f "$mount/app.db" ]]; then
+    echo "$mount/app.db"
+    return 0
+  fi
+  if [[ -f "$root/data/app.db" ]]; then
+    echo "$root/data/app.db"
+    return 0
+  fi
+  echo "无法从运行中容器 Docker Mount 解析 SQLite，且未提供有效 SQLITE_PATH。禁止假设 /home/admin/data/app.db。" >&2
+  return 1
+}
+
+apply_local() {
+  validate_prod_root "$APP_DIR"
+  local env_path db_path
+  env_path="$APP_DIR/.env"
+  if [[ ! -f "$env_path" ]]; then
+    echo "生产 .env 不存在: $env_path" >&2
+    exit 1
+  fi
+  if ! db_path="$(resolve_sqlite_path "$APP_DIR")"; then
+    exit 1
+  fi
+  local ts backup_dir extract_dir rollback_tag old_id new_id db_backup compose
   ts="$(date +%Y%m%d%H%M%S)"
-  backup_dir="${APP_DIR%/}-backup-${ts}"
+  backup_dir="${APP_DIR%/}-src-backup-${ts}"
   extract_dir="$(mktemp -d "${TMPDIR:-/tmp}/rssc-extract-${ts}-XXXXXX")"
   rollback_tag="${IMAGE_REPO}:rollback-${ts}"
-  db_path="${SQLITE_PATH:-$APP_DIR/data/app.db}"
   db_backup="${backup_dir}.sqlite"
   compose="$(resolve_compose)"
 

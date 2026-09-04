@@ -356,9 +356,21 @@ describe("V6 anonymized hybrid OCR structure", () => {
       socialName: "候选人甲",
       experiences: [experience("深圳示例科技有限公司", "2021-01", "2021-02")],
       socialRecords: [social("待映射单位", "2021-01", "2021-02", ["2021-01"], "unknown")],
+      manualLinks: [
+        {
+          id: "map-unknown",
+          resumeSourceId: "resume-0",
+          socialSourceId: "social-0",
+          reviewStatus: "applied",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
     });
-    expect(report.rows.some((row) => row.reason.includes("缴费类型待确认"))).toBe(true);
-    expect(report.recruiterTotals.unknownPaidMonthCount).toBe(1);
+    expect(inferPaymentType("待映射单位", "unknown")).toBe("unknown");
+    expect(inferPaymentType("待映射单位", "unknown")).not.toBe("personal");
+    expect(report.rows.some((row) => row.reason.includes("待确认"))).toBe(true);
+    expect(report.rows.some((row) => row.status === "NEEDS_REVIEW")).toBe(true);
+    expect(report.recruiterTotals.unknownPaidMonthCount).toBe(0);
     expect(report.recruiterTotals.personalPaidMonthCount).toBe(0);
   });
 
@@ -372,9 +384,8 @@ describe("V6 anonymized hybrid OCR structure", () => {
         social("个人缴费窗口", "2021-02", "2021-02", ["2021-02"], "personal"),
       ],
     });
-    expect(report.recruiterTotals.actualPaidMonthCount).toBe(2);
-    expect(report.recruiterTotals.overlapMonthCount).toBe(1);
-    expect(report.recruiterTotals.actualPaidDuration).toMatch(/^\d+年\d+个月$|^\d+年$|^\d+个月$/);
+    expect(report.recruiterTotals.actualPaidMonthCount).toBe(0);
+    expect(report.recruiterSummary.fullText).not.toContain("定薪有效");
     expect(report.recruiterTotals.actualPaidDuration).not.toMatch(/\./);
   });
 
@@ -440,7 +451,7 @@ describe("V6 anonymized hybrid OCR structure", () => {
     });
     const history = readOverallConclusion(report, "COMPLETED");
     const workbench = readOverallConclusion(report);
-    expect(report.schemaVersion).toBe(6);
+    expect(report.schemaVersion).toBe(7);
     expect(history.overallConclusion).toBe(report.overallConclusion);
     expect(workbench.overallConclusion).toBe(report.overallConclusion);
     expect(report.recruiterSummary.fullText).toContain(
@@ -475,6 +486,17 @@ describe("V6 anonymized hybrid OCR structure", () => {
         "COMPLETED",
       ).overallConclusion,
     ).toBe("NEEDS_REVIEW");
+    expect(
+      readOverallConclusion(
+        {
+          schemaVersion: 6,
+          overallConclusion: "PASS",
+          overallConclusionLabel: "通过",
+          recruiterSummary: { conclusion: "PASS", passCount: 1 },
+        },
+        "COMPLETED",
+      ).overallConclusion,
+    ).toBe("PASS");
   });
 
   it("22 keeps mobile three-card and desktop high-contrast styles", () => {
@@ -491,9 +513,9 @@ describe("V6 anonymized hybrid OCR structure", () => {
     expect(css).toMatch(/white-space: nowrap/);
     expect(resultView).toContain("识别依据");
     expect(resultView).toContain("来源冲突，待确认");
-    expect(resultView).toContain("简历申报");
-    expect(resultView).toContain("社保事实依据");
-    expect(resultView).toContain("核验结果");
+    expect(resultView).toContain("简历公司");
+    expect(resultView).toContain("社保公司");
+    expect(resultView).toContain("该段结论");
   });
 
   it("23 does not write resume text, names, companies or secrets to ordinary logs", () => {

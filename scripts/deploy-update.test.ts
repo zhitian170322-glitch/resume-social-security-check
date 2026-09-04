@@ -55,6 +55,9 @@ describe("deploy-update.sh safety", () => {
     expect(source).toContain("MANUAL_ONLY");
     expect(source).toContain("--apply-local");
     expect(source).toContain("--confirm=APPLY-LOCAL");
+    expect(source).toContain("--app-dir");
+    expect(source).toContain("拒绝把 /home/admin 识别为生产根目录");
+    expect(source).not.toMatch(/APP_DIR="\$\(pwd\)"/);
     expect(source).toContain("docker image inspect");
     expect(source).toContain("PRAGMA integrity_check");
     expect(source).toMatch(/禁止:[\s\S]*orangeito-app/);
@@ -96,6 +99,8 @@ describe("deploy-update.sh safety", () => {
     const appDir = join(directory, "app");
     await mkdir(join(appDir, "data"), { recursive: true });
     await writeFile(join(appDir, "data", "app.db"), "");
+    await writeFile(join(appDir, "docker-compose.yml"), "services:\n  app: {}\n");
+    await writeFile(join(appDir, ".env"), "DATABASE_URL=file:/data/app.db\n");
     const { packagePath, checksumPath } = await makePackage(directory, "def5678");
     const binDir = join(directory, "bin");
     await mkdir(binDir);
@@ -158,6 +163,8 @@ exit 0
     const appDir = join(directory, "app");
     await mkdir(join(appDir, "data"), { recursive: true });
     await writeFile(join(appDir, "data", "app.db"), "");
+    await writeFile(join(appDir, "docker-compose.yml"), "services:\n  app: {}\n");
+    await writeFile(join(appDir, ".env"), "DATABASE_URL=file:/data/app.db\n");
     const { packagePath, checksumPath } = await makePackage(directory, "aaa1111");
     const binDir = join(directory, "bin");
     await mkdir(binDir);
@@ -175,7 +182,7 @@ if [[ "\$1" == "image" && "\$2" == "inspect" ]]; then
     echo "sha256:oldimage"
     exit 0
   fi
-  if [[ "\$ref" == *":v6-aaa1111" ]]; then
+  if [[ "\$ref" == *":v7-aaa1111" ]]; then
     echo "sha256:newimage"
     exit 0
   fi
@@ -229,10 +236,62 @@ exit 0
       },
     );
     expect(stdout).toContain("APPLY-LOCAL 完成");
-    expect(stdout).toContain("resume-social-security-check:v6-aaa1111");
+    expect(stdout).toContain("resume-social-security-check:v7-aaa1111");
     const log = await readFile(logPath, "utf8");
     expect(log).toContain("image inspect");
-    expect(log).toMatch(/tag resume-social-security-check:v6-aaa1111 resume-social-security-check:latest/);
+    expect(log).toMatch(/tag resume-social-security-check:v7-aaa1111 resume-social-security-check:latest/);
     expect(log).not.toContain("--remove-orphans");
+  });
+
+  it("rejects /home/admin as the production root before any write", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rssc-bad-root-"));
+    const { packagePath, checksumPath } = await makePackage(directory);
+    await expect(
+      exec("bash", [
+        script,
+        packagePath,
+        checksumPath,
+        "--apply-local",
+        "--confirm=APPLY-LOCAL",
+        "--app-dir=/home/admin",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("/home/admin"),
+    });
+  });
+
+  it("rejects a missing production .env before backup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rssc-bad-env-"));
+    const appDir = join(directory, "app");
+    await mkdir(appDir, { recursive: true });
+    await writeFile(join(appDir, "docker-compose.yml"), "services:\n  app: {}\n");
+    const { packagePath, checksumPath } = await makePackage(directory);
+    await expect(
+      exec("bash", [script, packagePath, checksumPath, "--apply-local", "--confirm=APPLY-LOCAL"], {
+        env: { ...process.env, DEPLOY_APP_DIR: appDir, SQLITE_PATH: join(appDir, "missing.db") },
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(".env"),
+    });
+  });
+
+  it("rejects a missing SQLite path before backup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rssc-bad-db-"));
+    const appDir = join(directory, "app");
+    await mkdir(appDir, { recursive: true });
+    await writeFile(join(appDir, "docker-compose.yml"), "services:\n  app: {}\n");
+    await writeFile(join(appDir, ".env"), "DATABASE_URL=file:/data/app.db\n");
+    const { packagePath, checksumPath } = await makePackage(directory);
+    await expect(
+      exec("bash", [script, packagePath, checksumPath, "--apply-local", "--confirm=APPLY-LOCAL"], {
+        env: {
+          ...process.env,
+          DEPLOY_APP_DIR: appDir,
+          SQLITE_PATH: join(appDir, "no-such.db"),
+        },
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("SQLite"),
+    });
   });
 });
