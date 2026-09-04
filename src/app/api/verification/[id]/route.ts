@@ -346,6 +346,15 @@ export async function PATCH(
       return NextResponse.json({ message: "任务完成后才能人工复核" }, { status: 409 });
     }
     const result = parseJson(task.result_json) as SimpleVerificationReport | null;
+    if (result && !result.systemExtracted && result.schemaVersion === 7) {
+      result.systemExtracted = {
+        candidateName: result.candidateName,
+        experiences: result.experiences,
+        socialRecords: result.socialRecords,
+        socialName: result.socialName ?? null,
+        duplicateNotice: result.duplicateNotice ?? null,
+      };
+    }
     if (!result?.systemExtracted || !canPersistReview) {
       return NextResponse.json(
         { message: "当前结果无法安全持久化人工修正，未改写数据库结构" },
