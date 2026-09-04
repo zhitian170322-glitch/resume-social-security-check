@@ -64,7 +64,10 @@ export function matchesHistorySearch(record: HistorySearchRecord, query: History
     const matched =
       record.overallConclusion === status ||
       record.overallConclusionLabel === status ||
-      record.status === status;
+      record.status === status ||
+      (status === "处理中" && record.status !== "COMPLETED" && record.status !== "FAILED") ||
+      (status === "已终止" && (record.overallConclusion === "CANCELLED" || record.status === "CANCELLED")) ||
+      (status === "处理失败" && record.overallConclusion === "FAILED");
     if (!matched) return false;
   }
   if (query.from && record.createdAt.slice(0, 10) < query.from) return false;
@@ -81,9 +84,14 @@ export function historyRecordFromTask(row: {
   created_at: string;
   updated_at?: string | null;
   completed_at?: string | null;
+  cancel_state?: string | null;
+  error_code?: string | null;
 }): HistorySearchRecord {
   const result = row.result_json ? (JSON.parse(row.result_json) as unknown) : null;
-  const conclusion = readOverallConclusion(result, row.status);
+  const conclusion = readOverallConclusion(result, row.status, {
+    cancelState: row.cancel_state,
+    errorCode: row.error_code,
+  });
   const companies = companiesFromResult(result);
   return {
     id: row.id,

@@ -57,9 +57,8 @@ describe("manual field overrides", () => {
     });
     expect(applied.experiences[0]?.companyRaw).toBe("乙科技有限公司");
     expect(report.rows[0]?.hasManualOverride).toBe(true);
-    expect(report.recruiterSummary.fullText).toContain("系统识别=甲科技有限公司");
-    expect(report.recruiterSummary.fullText).toContain("人工修正=乙科技有限公司");
-    expect(report.overallConclusion).toBe("FAIL");
+    expect(report.recruiterSummary.fullText).toContain("乙科技有限公司");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
   });
 
   it("reverts an override back to the system value", () => {

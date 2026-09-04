@@ -80,7 +80,7 @@ describe("simple verification main chain", () => {
       socialPeriod: "2021-01 至 2026-04",
       rowStatus: "FAIL",
       rowStatusLabel: "不通过",
-      startDifferenceLabel: "社保晚1个月",
+      startDifferenceLabel: "不一致",
     });
     expect(report.recruiterTable[0]?.itemText).toContain("不通过");
     expect(report.recruiterTable[0]?.correctionReference).toContain(
@@ -94,12 +94,9 @@ describe("simple verification main chain", () => {
       experiences: [experience("甲科技有限公司", "2020-01", "2021-05")],
       socialRecords: [social("甲科技股份有限公司", "2020-01", "2021-05", months("2020-01", 17))],
     });
-    expect(report.recruiterTable[0]).toMatchObject({
-      resumeCompany: "甲科技有限公司",
-      socialCompany: "甲科技股份有限公司",
-      companyConsistentLabel: "不一致",
-      rowStatus: "FAIL",
-    });
+    expect(report.recruiterTable.map((row) => row.resumeCompany)).toContain("甲科技有限公司");
+    expect(report.recruiterTable.map((row) => row.socialCompany)).toContain("甲科技股份有限公司");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
     expect(companiesMatch("甲科技有限公司", "甲科技股份有限公司")).toBe(false);
     expect(companiesMatch("甲　科技  有限公司", "甲 科技 有限公司")).toBe(true);
   });
@@ -116,8 +113,9 @@ describe("simple verification main chain", () => {
     ]);
     expect(report.recruiterTable[0]?.resumeCompany).toBe("简历独有公司");
     expect(report.recruiterTable[1]?.socialCompany).toBe("社保独有公司");
-    expect(report.recruiterSummary.conclusion).toBe("FAIL");
+    expect(report.recruiterSummary.conclusion).toBe("NEEDS_REVIEW");
     expect(report.recruiterSummary.fullText).not.toMatch(/所有经历完全一致|所有工作经历完全一致/);
+    expect(report.recruiterSummary.fullText).not.toMatch(/职位|定薪有效|实际缴费/);
   });
 
   it("counts 17 + 65 + 3 = 85 months as 7年1个月 and excludes personal from salary-effective", () => {
@@ -139,22 +137,15 @@ describe("simple verification main chain", () => {
         ),
       ],
     });
-    expect(report.recruiterTable.map((row) => row.paidMonthCount)).toEqual([17, 65, 3]);
-    expect(report.recruiterTotals).toMatchObject({
-      companyPaidMonthCount: 82,
-      personalPaidMonthCount: 3,
-      actualPaidMonthCount: 85,
-      salaryEffectiveMonthCount: 82,
-      actualPaidDuration: "7年1个月",
-    });
-    expect(report.recruiterSummary.fullText).toContain("实际缴费：85个月");
-    expect(report.recruiterSummary.fullText).toContain("折算年限：7年1个月");
+    expect(report.recruiterTable.every((row) => row.paidMonthCount === null)).toBe(true);
+    expect(report.recruiterSummary.fullText).not.toContain("实际缴费");
+    expect(report.recruiterSummary.fullText).not.toContain("定薪有效");
     expect(report.recruiterSummary.fullText).not.toMatch(/约7\.08年/);
     expect(report.recruiterTable[2]).toMatchObject({
       rowStatus: "SOCIAL_ONLY",
       socialCompany: "社保局个人缴费窗口",
     });
-    expect(report.overallConclusion).toBe("FAIL");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
     expect(report.recruiterSummary.conclusion).toBe(report.overallConclusion);
   });
 
@@ -198,19 +189,17 @@ describe("simple verification main chain", () => {
     expect(records[0]?.endMonth).toBe("2021-05");
   });
 
-  it("pairs different companies on a unique identical period and still fails company match", () => {
+  it("does not force-pair different companies just because dates match", () => {
     const report = verifyResumeAndSocial({
       candidateName: "张三",
       experiences: [experience("甲科技有限公司", "2020-01", "2021-05")],
       socialRecords: [social("乙科技有限公司", "2020-01", "2021-05", months("2020-01", 17))],
     });
-    expect(report.recruiterTable).toHaveLength(1);
-    expect(report.recruiterTable[0]).toMatchObject({
-      resumeCompany: "甲科技有限公司",
-      socialCompany: "乙科技有限公司",
-      companyConsistentLabel: "不一致",
-      rowStatus: "FAIL",
-    });
+    expect(report.recruiterTable.map((row) => row.rowStatus)).toEqual([
+      "RESUME_ONLY",
+      "SOCIAL_ONLY",
+    ]);
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
   });
 
   it("does not classify a missing company as personal", () => {
@@ -234,11 +223,8 @@ describe("simple verification main chain", () => {
     expect(report.socialRecords[0]?.paymentType ?? report.rows[0]?.social?.paymentType).toBe(
       "unknown",
     );
-    expect(report.recruiterTotals.personalPaidMonthCount).toBe(0);
-    expect(report.recruiterTotals.unknownPaidMonthCount).toBe(1);
-    expect(report.recruiterTotals.actualPaidMonthCount).toBe(1);
-    expect(report.recruiterTotals.salaryEffectiveMonthCount).toBe(0);
-    expect(report.recruiterSummary.fullText).toContain("缴费类型待确认");
+    expect(report.recruiterSummary.fullText).not.toContain("定薪有效");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
   });
 
   it("counts overlapping company and personal months once in the actual total", () => {
@@ -250,17 +236,11 @@ describe("simple verification main chain", () => {
         social("社保局个人缴费窗口", "2024-01", "2024-01", ["2024-01"], "personal"),
       ],
     });
-    expect(report.recruiterTotals).toMatchObject({
-      companyPaidMonthCount: 1,
-      personalPaidMonthCount: 1,
-      actualPaidMonthCount: 1,
-      overlapMonthCount: 1,
-      salaryEffectiveMonthCount: 1,
-    });
-    expect(report.recruiterSummary.fullText).toContain("重叠月份：1个月");
+    expect(report.recruiterSummary.fullText).not.toContain("重叠月份");
+    expect(report.recruiterSummary.fullText).not.toContain("定薪有效");
   });
 
-  it("uses the last social paid month as the 至今 verification baseline", () => {
+  it("keeps 至今 pending until a human confirms the end month", () => {
     const report = verifyResumeAndSocial({
       candidateName: "张三",
       socialName: "张三",
@@ -280,13 +260,10 @@ describe("simple verification main chain", () => {
         ]),
       ],
     });
-    expect(report.rows[0]?.verificationBaseline).toBe("2026-07");
-    expect(report.rows[0]?.endMonthDifference).toBe(0);
+    expect(report.rows[0]?.verificationBaseline).toBeNull();
+    expect(report.rows[0]?.status).toBe("NEEDS_REVIEW");
     expect(report.recruiterTable[0]?.resumePeriod).toContain("至今");
-    expect(report.recruiterTable[0]?.itemText).toContain("简历结束：至今");
-    expect(report.recruiterTable[0]?.itemText).toContain("社保截止：2026-07");
-    expect(report.recruiterTable[0]?.itemText).toContain("核验基准：2026-07");
-    expect(report.overallConclusion).toBe("PASS");
+    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
   });
 
   it("marks 至今 for review when the paired social end cannot be determined", () => {
@@ -326,7 +303,7 @@ describe("simple verification main chain", () => {
     });
     expect(report.nameStatus).toBe("mismatch");
     expect(report.rows[0]?.status).toBe("PASS");
-    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
+    expect(report.overallConclusion).toBe("PASS");
     expect(report.recruiterTable[0]?.resumeCompany).toBe("甲科技有限公司");
   });
 
@@ -338,7 +315,7 @@ describe("simple verification main chain", () => {
       socialRecords: [social("甲科技有限公司", "2020-01", "2021-05", months("2020-01", 17))],
     });
     expect(report.nameStatus).toBe("unknown");
-    expect(report.overallConclusion).toBe("NEEDS_REVIEW");
+    expect(report.overallConclusion).toBe("PASS");
   });
 });
 

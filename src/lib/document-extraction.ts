@@ -14,7 +14,7 @@ import {
 import { TextQualityEvaluator } from "./text-quality";
 
 export const EVIDENCE_TASK_SCHEMA_VERSION = 2;
-export const DOCUMENT_EXTRACTION_VERSION = "hybrid-ocr-v6";
+export const DOCUMENT_EXTRACTION_VERSION = "core-review-v7";
 
 export type DocumentKind = "RESUME" | "SOCIAL_SECURITY";
 export type DocumentPageType =

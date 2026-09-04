@@ -5,6 +5,7 @@ import {
 } from "./social-security-parsers";
 import type { SocialSecurityOCRResult } from "./social-security-table";
 import {
+  companiesMatch,
   inferPaymentType,
   uniquePaidMonths,
   type SocialRecord,
@@ -12,6 +13,7 @@ import {
 import { inclusiveMonthRange } from "./social-security-evidence";
 import {
   companyFromMappedName,
+  isLikelyTruncatedName,
   isUnitCode,
   stripRegionLabelPrefix,
 } from "./company-cleanup";
@@ -211,12 +213,21 @@ export function extractSocialRecords(input: {
   );
   const fromCodes = fromUnitCodes(input.ocr, input.sourceFile);
   const merged = mergeSocialRecords([fromCodes, fromTablesAndText, fromRawText]);
+  const tableCompany = cleanedCompany(fromTablesAndText[0]?.companyRaw).companyRaw;
+  const generalCompany = cleanedCompany(fromRawText[0]?.companyRaw).companyRaw;
+  const sourceConflict =
+    Boolean(tableCompany && generalCompany) &&
+    (companiesMatch(tableCompany, generalCompany) === false ||
+      isLikelyTruncatedName(tableCompany, generalCompany));
   return merged
     .map((record) => {
       const cleaned = cleanedCompany(record.companyRaw, record.sourceQuote);
       return {
         ...record,
         companyRaw: cleaned.companyRaw,
+        tableCompany,
+        generalCompany,
+        sourceConflict,
         companyNormalized: cleaned.companyRaw
           ? stripRegionLabelPrefix(cleaned.companyRaw)
               .normalize("NFKC")

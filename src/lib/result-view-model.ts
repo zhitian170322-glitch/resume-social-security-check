@@ -192,6 +192,19 @@ export type RecruiterComparisonRow = {
   endIsPresent?: boolean;
   hasSourceConflict?: boolean;
   fieldEvidence?: Record<string, FieldEvidenceView>;
+  matchScoreLabel?: string;
+  companyDiff?: {
+    left: Array<{ char: string; changed: boolean }>;
+    right: Array<{ char: string; changed: boolean }>;
+  };
+  resumeStartMonth?: string | null;
+  resumeEndMonth?: string | null;
+  socialStartMonth?: string | null;
+  socialEndMonth?: string | null;
+  resumeSourceId?: string;
+  socialSourceId?: string;
+  gapNotice?: string | null;
+  sourceFile?: string | null;
 };
 
 export type RecruiterTotals = {
@@ -253,6 +266,9 @@ export type ResultViewModel =
       overallConclusion?: SimpleVerificationReport["overallConclusion"];
       overallConclusionLabel?: string;
       sourceConflicts?: SimpleVerificationReport["sourceConflicts"];
+      reviewLock?: SimpleVerificationReport["reviewLock"];
+      reviewProgress?: SimpleVerificationReport["reviewProgress"];
+      conclusionSourceLabel?: string;
     }
   | {
       schemaVersion: 1;
@@ -1562,6 +1578,9 @@ function buildSimpleResultViewModel(
     overallConclusion: report.overallConclusion,
     overallConclusionLabel: report.overallConclusionLabel,
     sourceConflicts: report.sourceConflicts,
+    reviewLock: report.reviewLock,
+    reviewProgress: report.reviewProgress,
+    conclusionSourceLabel: report.conclusionSourceLabel,
   };
 }
 
@@ -1580,7 +1599,8 @@ export function buildResultViewModel(input: {
     "schemaVersion" in input.result &&
     (input.result.schemaVersion === 4 ||
       input.result.schemaVersion === 5 ||
-      input.result.schemaVersion === 6)
+      input.result.schemaVersion === 6 ||
+      input.result.schemaVersion === 7)
   ) {
     return buildSimpleResultViewModel(
       input.result as SimpleVerificationReport,

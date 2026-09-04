@@ -92,7 +92,6 @@ describe("DeepSeek resume parse resilience", () => {
               expect.objectContaining({ sourceMethod: "pdf_text" }),
             ]),
           },
-          position: { value: "Java开发工程师" },
           resumeStartMonth: {
             rawValue: "2022年7月",
             normalizedValue: "2022-07",
@@ -122,11 +121,7 @@ describe("DeepSeek resume parse resilience", () => {
     ]);
 
     expect(result.experiences).toHaveLength(1);
-    expect(result.experiences[0].position).toMatchObject({
-      value: null,
-      status: "missing",
-      sourceCandidates: [],
-    });
+    expect(result.experiences[0].position).toBeUndefined();
     expect(result.experiences[0].resumeEndMonth).toMatchObject({
       value: null,
       status: "missing",

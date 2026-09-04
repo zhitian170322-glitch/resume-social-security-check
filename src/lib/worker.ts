@@ -44,7 +44,11 @@ import { buildPageEvidence } from "./page-evidence";
 import {
   type SocialRecord,
   verifyResumeAndSocial,
+  type SimpleVerificationReport,
 } from "./simple-verification";
+import { applyFieldOverrides, type FieldOverride } from "./manual-override";
+import { TaskCancelledError, readCancelState } from "./task-lifecycle";
+import type { ManualLink, ReviewAuditEntry, ReviewLock } from "./review-state";
 import {
   type DocumentPage,
   DocumentPageSchema,
@@ -144,6 +148,29 @@ function updateTask(id: string, values: Record<string, string | number | null>) 
   db.prepare(
     `UPDATE verification_tasks SET ${keys.map((key) => `${key} = ?`).join(", ")} WHERE id = ?`,
   ).run(...keys.map((key) => values[key]), id);
+}
+
+function assertNotCancelled(taskId: string) {
+  const row = db
+    .prepare("SELECT cancel_state, status, error_code FROM verification_tasks WHERE id = ?")
+    .get(taskId) as
+    | { cancel_state: string | null; status: string; error_code: string | null }
+    | undefined;
+  const cancel = readCancelState(row?.cancel_state);
+  if (cancel === "cancel_requested" || cancel === "cancelled" || row?.error_code === "CANCELLED") {
+    throw new TaskCancelledError();
+  }
+}
+
+function markCancelled(taskId: string) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE verification_tasks
+     SET status = 'FAILED', stage = 'CANCELLED', error_code = 'CANCELLED',
+         error_message = '识别已终止', cancel_state = 'cancelled', updated_at = ?
+     WHERE id = ? AND cancel_state IN ('cancel_requested', 'cancelled')
+        AND status != 'COMPLETED'`,
+  ).run(now, taskId);
 }
 
 function claimNextTask(): TaskRow | null {
@@ -564,6 +591,7 @@ async function extractOCRStage(
           throw new Error("PDF_PARSE_FAILED: 缺少已缓存的 PDF 提取结果");
         }
         for (const page of analysis.pages) {
+          assertNotCancelled(task.id);
           const classification = socialPageClassifier.classify({
             mimeType: file.mime_type,
             text: page.localText,
@@ -737,6 +765,7 @@ async function structureStage(
     ? ResumeEvidenceExtractionSchema.parse(cachedResume)
     : null;
   if (!resume) {
+    assertNotCancelled(task.id);
     resume = await extractResumeWithEvidence(resumePages, (metric) => {
         recordApiCall({
           taskId: task.id,
@@ -769,27 +798,9 @@ async function structureStage(
     ]);
   }
   for (const [sourceFile, filePages] of socialByFile) {
-    const merged: SocialSecurityOCRResult = {
-      page: filePages[0]?.page ?? 1,
-      rawText: filePages.map((page) => page.rawText).join("\n"),
-      tables: filePages.flatMap((page) => page.tables),
-      requestId: filePages.map((page) => page.requestId).filter(Boolean).join(",") || null,
-      provider: filePages[0]?.provider ?? "unknown",
-      providerVersion: filePages[0]?.providerVersion ?? "unknown",
-      apiType: filePages.some((page) => page.apiType === "TABLE")
-        ? "TABLE"
-        : "GENERAL",
-      ocrVersion: filePages[0]?.ocrVersion ?? "unknown",
-      contentHash: contentHash(
-        filePages.map((page) => page.contentHash).join("|"),
-      ),
-      rawProviderResponseRef:
-        filePages
-          .map((page) => page.rawProviderResponseRef)
-          .filter(Boolean)
-          .join(",") || null,
-    };
-    socialRecords.push(...extractSocialRecords({ ocr: merged, sourceFile }));
+    for (const page of filePages) {
+      socialRecords.push(...extractSocialRecords({ ocr: page, sourceFile }));
+    }
   }
   return { resume, socialRecords };
 }
@@ -817,6 +828,7 @@ function usageForTask(taskId: string) {
 }
 
 async function processTask(task: TaskRow) {
+  assertNotCancelled(task.id);
   assertPipelineVersions({
     taskSchemaVersion: task.task_schema_version,
     extractionVersion: task.extraction_version,
@@ -905,6 +917,7 @@ async function processTask(task: TaskRow) {
     }),
   );
   if (!ocrPayload) {
+    assertNotCancelled(task.id);
     ocrPayload = await extractOCRStage(
       task,
       resumeFile,
@@ -933,6 +946,7 @@ async function processTask(task: TaskRow) {
     }),
   );
   if (!structured) {
+    assertNotCancelled(task.id);
     structured = await structureStage(task, ocrPayload);
     writeVersionedStageArtifact({
       taskId: task.id,
@@ -947,7 +961,7 @@ async function processTask(task: TaskRow) {
   const experiences = structured.resume.experiences.map((experience, index) => ({
     sourceId: `resume-${index}`,
     companyRaw: experience.resumeCompany.value,
-    position: experience.position?.value ?? null,
+    position: null,
     startMonth: experience.resumeStartMonth.value,
     endMonth: experience.resumeEndMonth.value,
     endMonthRaw: experience.resumeEndMonth.rawValue ?? null,
@@ -1001,19 +1015,36 @@ async function processTask(task: TaskRow) {
         page.warnings.includes("OCR_BOTH_SOURCES_EMPTY") ||
         page.warnings.includes("SOURCE_CONFLICT"),
     );
+  assertNotCancelled(task.id);
+  const previous = task.result_json
+    ? (JSON.parse(task.result_json) as SimpleVerificationReport)
+    : null;
+  const preservedOverrides = (previous?.fieldOverrides ?? []) as FieldOverride[];
+  const preservedLinks = previous?.manualLinks ?? [];
+  const preservedAudit = (previous?.reviewAudit ?? []) as ReviewAuditEntry[];
+  const preservedLock = previous?.reviewLock as ReviewLock | undefined;
+  const applied = applyFieldOverrides({
+    experiences,
+    socialRecords,
+    overrides: preservedOverrides,
+  });
   const report = {
     ...verifyResumeAndSocial({
       candidateName: extracted.candidateName,
       socialName: extracted.socialName,
-      experiences,
-      socialRecords,
+      experiences: applied.experiences,
+      socialRecords: applied.socialRecords,
       duplicateNotice: extracted.duplicateNotice,
       sourceConflicts,
       hasUnconfirmedFields,
+      overrides: preservedOverrides,
+      manualLinks: preservedLinks,
+      reviewLock: preservedLock,
+      reviewAudit: preservedAudit,
     }),
     monthDetails: details,
     monthDetailsText: monthDetailsText(details),
-    fieldOverrides: [],
+    fieldOverrides: preservedOverrides,
     systemExtracted: extracted,
   };
   writeVersionedStageArtifact({
@@ -1033,21 +1064,43 @@ async function processTask(task: TaskRow) {
     version: PIPELINE_VERSIONS.verificationEngineVersion,
     verificationStatus: report.recruiterSummary.conclusion,
   });
+  assertNotCancelled(task.id);
   const usage = usageForTask(task.id);
   const now = new Date().toISOString();
-  updateTask(task.id, {
-    status: "COMPLETED",
-    stage: "COMPLETED",
-    candidate_name: report.candidateName,
-    resume_json: JSON.stringify(structured.resume),
-    social_security_json: JSON.stringify(structured.socialRecords),
-    result_json: JSON.stringify(report),
-    ocr_pages: usage.ocrPages,
-    deepseek_calls: usage.deepseekCalls,
-    estimated_cost: usage.estimatedCost,
-    completed_at: now,
-    updated_at: now,
-  });
+  const locked = Boolean(task.review_locked || previous?.reviewLock?.locked);
+  const persisted = locked && previous ? previous : report;
+  if (locked) {
+    logSafeEvent("info", {
+      taskId: task.id,
+      stage: "REVIEW_LOCKED",
+      verificationStatus: persisted.overallConclusion,
+    });
+  }
+  const completed = db
+    .prepare(
+      `UPDATE verification_tasks
+       SET status = 'COMPLETED', stage = 'COMPLETED', candidate_name = ?,
+           resume_json = ?, social_security_json = ?, result_json = ?,
+           ocr_pages = ?, deepseek_calls = ?, estimated_cost = ?,
+           completed_at = ?, updated_at = ?
+       WHERE id = ? AND cancel_state = 'none' AND status != 'COMPLETED'`,
+    )
+    .run(
+      persisted.candidateName,
+      JSON.stringify(structured.resume),
+      JSON.stringify(structured.socialRecords),
+      JSON.stringify(persisted),
+      usage.ocrPages,
+      usage.deepseekCalls,
+      usage.estimatedCost,
+      now,
+      now,
+      task.id,
+    );
+  if (!completed.changes) {
+    markCancelled(task.id);
+    throw new TaskCancelledError();
+  }
 }
 
 function classifyError(error: unknown) {
@@ -1063,6 +1116,7 @@ function classifyError(error: unknown) {
       error.code === "AI_PARSE_FAILED")
   )
     return "AI_PARSE_FAILED";
+  if (error instanceof TaskCancelledError || text === "TASK_CANCELLED") return "CANCELLED";
   if (error instanceof OCRLimitError || text.includes("OCR") || text.includes("阿里云"))
     return "OCR_FAILED";
   return "VERIFICATION_FAILED";
@@ -1075,6 +1129,11 @@ async function runWorker() {
       try {
         await processTask(task);
       } catch (error) {
+        if (error instanceof TaskCancelledError) {
+          markCancelled(task.id);
+          task = claimNextTask();
+          continue;
+        }
         if (error instanceof OCRLimitError && error.code === "OCR_CONFIRM_REQUIRED") {
           updateTask(task.id, {
             status: "PENDING",

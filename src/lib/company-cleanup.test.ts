@@ -30,4 +30,10 @@ describe("company name pollution cleanup", () => {
     expect(isUnitCode("470855")).toBe(true);
     expect(companyFromMappedName("470855").companyRaw).toBeNull();
   });
+
+  it("clears an independent leading colon without guessing missing words", () => {
+    expect(companyFromMappedName("：鸿动力信息技术有限公司").companyRaw).toBe(
+      "鸿动力信息技术有限公司",
+    );
+  });
 });

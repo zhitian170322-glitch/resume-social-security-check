@@ -248,6 +248,15 @@ export function initializeDatabase() {
     );
     addColumn("verification_tasks", "review_note TEXT");
     addColumn("verification_tasks", "reviewed_at TEXT");
+    addColumn(
+      "verification_tasks",
+      "cancel_state TEXT NOT NULL DEFAULT 'none'",
+    );
+    addColumn(
+      "verification_tasks",
+      "review_locked INTEGER NOT NULL DEFAULT 0",
+    );
+    addColumn("verification_tasks", "review_locked_at TEXT");
     addColumn("api_calls", "document_id TEXT");
     db.prepare(
       "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, ?)",
@@ -281,4 +290,7 @@ export type TaskRow = {
   review_status: "PENDING" | "CONFIRMED" | "REJECTED";
   review_note: string | null;
   reviewed_at: string | null;
+  cancel_state: "none" | "cancel_requested" | "cancelled";
+  review_locked: 0 | 1;
+  review_locked_at: string | null;
 };

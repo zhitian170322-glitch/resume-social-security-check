@@ -3,11 +3,17 @@ import type { ResumeExperience, SocialRecord } from "./simple-verification";
 export type OverrideField =
   | "resumeCompany"
   | "socialCompany"
-  | "position"
+  | "resumeStartMonth"
+  | "resumeEndMonth"
+  | "socialStartMonth"
+  | "socialEndMonth"
   | "startMonth"
   | "endMonth"
+  | "position"
   | "paymentType"
   | "unitCompany";
+
+export type OverrideKind = "confirm" | "correct";
 
 export type FieldOverride = {
   id: string;
@@ -17,6 +23,7 @@ export type FieldOverride = {
   originalValue: string | null;
   systemValue: string | null;
   overrideValue: string | null;
+  kind?: OverrideKind;
   reviewStatus: "applied" | "reverted";
   updatedAt: string;
   updatedBy: "manual-review";
@@ -61,12 +68,24 @@ export function applyFieldOverrides(input: {
     if (override.field === "position" && resume) {
       resume.position = override.overrideValue;
     }
-    if (override.field === "startMonth" && resume) {
+    if (
+      (override.field === "startMonth" || override.field === "resumeStartMonth") &&
+      resume
+    ) {
       resume.startMonth = override.overrideValue;
     }
-    if (override.field === "endMonth" && resume) {
+    if (
+      (override.field === "endMonth" || override.field === "resumeEndMonth") &&
+      resume
+    ) {
       resume.endMonth = override.overrideValue;
       resume.endIsPresent = false;
+    }
+    if (override.field === "socialStartMonth" && social) {
+      social.startMonth = override.overrideValue;
+    }
+    if (override.field === "socialEndMonth" && social) {
+      social.endMonth = override.overrideValue;
     }
     if (override.field === "socialCompany" && social) {
       social.companyRaw = override.overrideValue;
@@ -105,7 +124,9 @@ export function isResumeOverrideField(field: OverrideField) {
     field === "resumeCompany" ||
     field === "position" ||
     field === "startMonth" ||
-    field === "endMonth"
+    field === "endMonth" ||
+    field === "resumeStartMonth" ||
+    field === "resumeEndMonth"
   );
 }
 

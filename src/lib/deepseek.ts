@@ -125,7 +125,6 @@ const ResumeAIResponseSchema = z
       z
         .object({
           companyRaw: optionalSourceText.optional().default(null),
-          position: optionalSourceText.optional().default(null),
           startMonthRaw: optionalSourceText.optional().default(null),
           endMonthRaw: optionalSourceText.optional().default(null),
         })
@@ -355,7 +354,6 @@ export function groundResumeAIResponse(
     candidateName: buildStringEvidence(input.candidateName, pages),
     experiences: input.experiences.map((experience) => ({
       resumeCompany: buildStringEvidence(experience.companyRaw, pages),
-      position: buildStringEvidence(experience.position, pages),
       resumeStartMonth: buildMonthEvidence(
         experience.startMonthRaw,
         pages,
@@ -584,9 +582,6 @@ export function selectResumeFieldSources(
   const candidateName = canonicalStringField(input.candidateName, pages);
   const experiences = input.experiences.map((experience) => {
     const resumeCompany = canonicalStringField(experience.resumeCompany, pages);
-    const position = experience.position
-      ? canonicalStringField(experience.position, pages)
-      : undefined;
     const resumeStartMonth = canonicalMonthField(
       experience.resumeStartMonth,
       pages,
@@ -602,7 +597,6 @@ export function selectResumeFieldSources(
       ]
     > = [
       ["resumeCompany", resumeCompany],
-      ["position", position],
       ["resumeStartMonth", resumeStartMonth],
       ["resumeEndMonth", resumeEndMonth],
     ];
@@ -612,7 +606,6 @@ export function selectResumeFieldSources(
     return {
       ...experience,
       resumeCompany,
-      position,
       resumeStartMonth,
       resumeEndMonth,
       warnings: [...new Set([...experience.warnings, ...fieldWarnings])],
@@ -649,19 +642,19 @@ export async function extractResumeWithEvidence(
   "candidateName": "姓名或null",
   "experiences": [{
     "companyRaw": "公司原文或null",
-    "position": "职位原文或null",
     "startMonthRaw": "开始年月原文或null",
     "endMonthRaw": "结束年月原文或null"
   }]
 }
 规则：
-1. companyRaw、position 和年月字段必须原样复制，禁止补全、纠错、简称、品牌替换或标准化。
-2. 原文没有字段时输出 null；禁止根据职责猜职位，禁止根据工龄或相邻经历补日期。
-3. 某个字段无法确认时只将该字段标为 null，不要删除整段工作经历。
-4. 不要自行融合互相冲突的公司名、姓名、职位或月份；冲突字段输出 null。
-5. 不得把不同页、不同经历中的文字拼成一个公司名。
-6. 不要输出 Evidence、sourceFile、sourcePage、sourceQuote、sourceMethod、confidence 或 sourceCandidates；这些由程序确定性构建。
-7. 不计算任职月数，不判断公司关系，不判断核验结论，不判断缴费类型，不映射单位编号。`,
+1. 只提取 candidateName、companyRaw、startMonthRaw、endMonthRaw。不要输出职位。
+2. companyRaw 和年月字段必须原样复制，禁止补全、纠错、简称、品牌替换或标准化。
+3. 原文没有字段时输出 null；禁止根据工龄或相邻经历补日期。
+4. 某个字段无法确认时只将该字段标为 null，不要删除整段工作经历。
+5. 不要自行融合互相冲突的公司名、姓名或月份；冲突字段输出 null。
+6. 不得把不同页、不同经历中的文字拼成一个公司名。
+7. 不要输出 Evidence、sourceFile、sourcePage、sourceQuote、sourceMethod、confidence 或 sourceCandidates；这些由程序确定性构建。
+8. 不计算任职月数，不判断公司关系，不判断核验结论，不判断缴费类型，不映射单位编号。`,
     formatLabeledResumeSource(pages),
     onCall,
   );
